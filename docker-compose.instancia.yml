@@ -1,0 +1,112 @@
+# Un PACS (Orthanc + PostgreSQL + app de informes) dentro de un servidor que aloja varios PACS.
+# No se usa directamente: lo maneja el comando `pacs` (servidor/pacs.sh), por ejemplo:
+#
+#   pacs nueva insi --centro "INSI"
+#
+# Cada PACS tiene su carpeta en /opt/pacs-instancias/<nombre>/ con su .env y sus datos,
+# su propio dominio, su propio puerto DICOM y su propia base de datos. La entrada web (HTTPS)
+# la hace un único Caddy compartido (docker-compose.proxy.yml) por la red "pacs-proxy".
+
+services:
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: orthanc
+      POSTGRES_PASSWORD: ${PG_PASSWORD}
+      POSTGRES_DB: orthanc
+    volumes:
+      - ${INSTANCIA_DIR}/data/postgres:/var/lib/postgresql/data
+
+  orthanc:
+    image: orthancteam/orthanc:latest   # en producción fija una versión concreta
+    restart: unless-stopped
+    depends_on: [postgres]
+    ports:
+      - "${DICOM_PUERTO_PUBLICO}:4242"
+    volumes:
+      - ${INSTANCIA_DIR}/data/orthanc:/var/lib/orthanc/db
+      # Lista de trabajo (worklist) que arma la app a partir de la agenda
+      - ${INSTANCIA_DIR}/data/worklists:/worklists:ro
+    environment:
+      ORTHANC__NAME: ${PACS_NOMBRE:-PACS}
+      ORTHANC__DICOM_AET: ${PACS_AET:-PACS}
+      ORTHANC__DICOM_CHECK_CALLED_AET: "false"
+      ORTHANC__DICOM_ALWAYS_ALLOW_STORE: "false"
+      ORTHANC__DICOM_ALWAYS_ALLOW_ECHO: "false"
+      # false en modo "solo AE Title" (pacs dicom-modo <nombre> aetitle)
+      ORTHANC__DICOM_CHECK_MODALITY_HOST: "${DICOM_VERIFICAR_IP:-true}"
+      ORTHANC__DICOM_MODALITIES_IN_DATABASE: "true"
+      ORTHANC__DICOM_ASSOCIATION_CLOSE_DELAY: "5"
+      ORTHANC__OVERWRITE_INSTANCES: "true"
+      ORTHANC__STABLE_AGE: "60"
+      ORTHANC__AUTHENTICATION_ENABLED: "false"
+      ORTHANC__POSTGRESQL__HOST: postgres
+      ORTHANC__POSTGRESQL__DATABASE: orthanc
+      ORTHANC__POSTGRESQL__USERNAME: orthanc
+      ORTHANC__POSTGRESQL__PASSWORD: ${PG_PASSWORD}
+      DICOM_WEB_PLUGIN_ENABLED: "true"
+      OHIF_PLUGIN_ENABLED: "true"
+      ORTHANC__OHIF__DATA_SOURCE: "dicom-web"
+      STONE_WEB_VIEWER_PLUGIN_ENABLED: "true"
+      GDCM_PLUGIN_ENABLED: "true"
+      HOUSEKEEPER_PLUGIN_ENABLED: "true"
+      WORKLISTS_PLUGIN_ENABLED: "true"
+      ORTHANC__WORKLISTS__DATABASE: /worklists
+    networks:
+      default: {}
+      proxy:
+        # Nombre único en la red compartida (ojo: "orthanc" a secas existe en todos los PACS)
+        aliases: ["${INSTANCIA}-orthanc"]
+
+  informes:
+    build: ./informes
+    image: rismed-informes:latest       # una sola imagen para todos los PACS del servidor
+    restart: unless-stopped
+    depends_on: [orthanc]
+    env_file: ${INSTANCIA_DIR}/.env
+    environment:
+      # Se usa el nombre único: en la red compartida "orthanc" podría ser el de otro PACS
+      ORTHANC_URL: http://${INSTANCIA}-orthanc:8042
+      DATA_DIR: /data
+      WEB_WORKERS: ${WEB_WORKERS:-2}
+      WORKLIST_DIR: /worklists
+    volumes:
+      - ${INSTANCIA_DIR}/data/informes:/data
+      - ${INSTANCIA_DIR}/data/worklists:/worklists
+    networks:
+      default: {}
+      proxy:
+        aliases: ["${INSTANCIA}-informes"]
+
+  # Agenda del centro (solo si el PACS tiene agenda: 'pacs agenda <nombre> <dominio>')
+  agenda:
+    profiles: ["agenda"]
+    build: ./agenda                      # la agenda viene en este mismo repositorio
+    image: rismed-agenda:latest          # una sola imagen para todas las agendas del servidor
+    restart: unless-stopped
+    environment:
+      DATA_DIR: /data
+      TZ: America/Santiago
+      CENTRO_NOMBRE: ${CENTRO_NOMBRE}
+      ADMIN_CLAVE: ${AGENDA_ADMIN_CLAVE:-}
+      COOKIE_SECURE: "1"
+      TRUST_PROXY: "1"
+      # La agenda habla con la app de informes por la red interna del servidor
+      PACS_URL: http://${INSTANCIA}-informes:8000
+      INTEGRACION_TOKEN: ${INTEGRACION_TOKEN:-}
+      PORTAL_URL: ${PORTAL_URL:-}
+      # Dirección del PACS para el botón «Ver en el PACS» de la agenda
+      PACS_PUBLICO_URL: ${PUBLIC_BASE_URL:-}
+      ACCESION_PREFIJO: ${ACCESION_PREFIJO:-AG}
+    volumes:
+      - ${INSTANCIA_DIR}/data/agenda:/data
+    networks:
+      default: {}
+      proxy:
+        aliases: ["${INSTANCIA}-agenda"]
+
+networks:
+  proxy:
+    name: pacs-proxy
+    external: true

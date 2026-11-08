@@ -1,0 +1,442 @@
+"""Base de datos SQLite de la app de informes (las imágenes viven en Orthanc)."""
+import os
+import sqlite3
+from datetime import datetime
+
+from flask import current_app, g
+from werkzeug.security import generate_password_hash
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS usuarios (
+    id INTEGER PRIMARY KEY,
+    usuario TEXT UNIQUE NOT NULL,
+    nombre TEXT NOT NULL,
+    clave_hash TEXT NOT NULL,
+    rol TEXT NOT NULL DEFAULT '',               -- (versión antigua; ahora se usa perfil_id)
+    perfil_id INTEGER,
+    titulo TEXT DEFAULT '',                      -- ej: Médico Radiólogo
+    registro TEXT DEFAULT '',                    -- RUT o N° registro Superintendencia
+    firma_png TEXT DEFAULT '',                   -- ruta a imagen de firma
+    centros TEXT DEFAULT '',                     -- centros permitidos, separados por coma (vacío = todos)
+    filtro_solicitante TEXT DEFAULT '',          -- derivador: su nombre como aparece en el DICOM
+    activo INTEGER NOT NULL DEFAULT 1,
+    creado TEXT NOT NULL,
+    paleta TEXT NOT NULL DEFAULT '',             -- colores que eligió el usuario ('' = azul)
+    eliminado INTEGER NOT NULL DEFAULT 0          -- eliminado: no entra ni aparece, pero su nombre queda en el historial
+);
+
+CREATE TABLE IF NOT EXISTS plantillas (
+    id INTEGER PRIMARY KEY,
+    nombre TEXT NOT NULL,
+    modalidad TEXT NOT NULL DEFAULT '',          -- CT, CR/DX, US... vacío = todas
+    cuerpo TEXT NOT NULL,
+    activo INTEGER NOT NULL DEFAULT 1
+);
+
+CREATE TABLE IF NOT EXISTS informes (
+    id INTEGER PRIMARY KEY,
+    estudio_id TEXT UNIQUE NOT NULL,             -- ID interno de Orthanc
+    estudio_uid TEXT NOT NULL,                   -- StudyInstanceUID
+    paciente_nombre TEXT, paciente_id TEXT, paciente_fnac TEXT, paciente_sexo TEXT,
+    fecha_estudio TEXT, modalidad TEXT, descripcion TEXT, accession TEXT,
+    institucion TEXT, solicitante TEXT,
+    cuerpo TEXT NOT NULL DEFAULT '',
+    estado TEXT NOT NULL DEFAULT 'borrador',     -- borrador | por_validar | firmado
+    hora_estudio TEXT DEFAULT '',
+    transcrito_por INTEGER, transcrito_en TEXT,
+    version INTEGER NOT NULL DEFAULT 1,
+    creado_por INTEGER, creado TEXT,
+    actualizado_por INTEGER, actualizado TEXT,
+    firmado_por INTEGER, firmado_en TEXT
+);
+
+CREATE TABLE IF NOT EXISTS informe_versiones (
+    id INTEGER PRIMARY KEY,
+    informe_id INTEGER NOT NULL,
+    version INTEGER NOT NULL,
+    cuerpo TEXT NOT NULL,
+    firmado_por INTEGER, firmado_en TEXT,
+    reabierto_por INTEGER, reabierto_en TEXT, motivo TEXT
+);
+
+CREATE TABLE IF NOT EXISTS links (
+    id INTEGER PRIMARY KEY,
+    token TEXT UNIQUE NOT NULL,
+    informe_id INTEGER NOT NULL,
+    clave TEXT DEFAULT '',
+    creado_por INTEGER, creado TEXT NOT NULL,
+    expira TEXT NOT NULL,
+    revocado INTEGER NOT NULL DEFAULT 0,
+    accesos INTEGER NOT NULL DEFAULT 0,
+    ultimo_acceso TEXT
+);
+
+CREATE TABLE IF NOT EXISTS auditoria (
+    id INTEGER PRIMARY KEY,
+    ts TEXT NOT NULL,
+    usuario TEXT, accion TEXT NOT NULL, detalle TEXT, ip TEXT
+);
+
+CREATE TABLE IF NOT EXISTS perfiles (
+    id INTEGER PRIMARY KEY,
+    clave TEXT UNIQUE NOT NULL,
+    nombre TEXT NOT NULL,
+    descripcion TEXT DEFAULT '',
+    permisos TEXT NOT NULL DEFAULT '',           -- claves separadas por coma (ver permisos.py)
+    solo_solicitados INTEGER NOT NULL DEFAULT 0, -- solo ve estudios donde figura como solicitante
+    activo INTEGER NOT NULL DEFAULT 1
+);
+
+-- Médicos solicitantes con acceso a un examen (se les da en la ficha del examen)
+CREATE TABLE IF NOT EXISTS estudio_accesos (
+    estudio_id TEXT NOT NULL,
+    usuario_id INTEGER NOT NULL,
+    asignado_por INTEGER, asignado_en TEXT,
+    origen TEXT DEFAULT '',                      -- 'agenda' si vino del médico de la cita
+    PRIMARY KEY (estudio_id, usuario_id)
+);
+CREATE INDEX IF NOT EXISTS ix_accesos_usuario ON estudio_accesos(usuario_id);
+
+-- Datos de trabajo por estudio que no van en el DICOM
+CREATE TABLE IF NOT EXISTS estudio_meta (
+    estudio_id TEXT PRIMARY KEY,
+    radiologo_id INTEGER, asignado_por INTEGER, asignado_en TEXT,
+    prioridad TEXT NOT NULL DEFAULT 'normal',    -- normal | urgente
+    paciente_email TEXT DEFAULT '', paciente_telefono TEXT DEFAULT '',
+    solicitante_manual TEXT DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS dictados (
+    id INTEGER PRIMARY KEY,
+    estudio_id TEXT NOT NULL,
+    paciente_nombre TEXT, paciente_id TEXT, descripcion TEXT, modalidad TEXT,
+    fecha_estudio TEXT, institucion TEXT, solicitante TEXT,
+    archivo TEXT NOT NULL, mime TEXT, duracion REAL DEFAULT 0,
+    creado_por INTEGER NOT NULL, creado TEXT NOT NULL,
+    estado TEXT NOT NULL DEFAULT 'pendiente',    -- pendiente | tomado | transcrito | anulado
+    transcriptor_id INTEGER, tomado_en TEXT, transcrito_en TEXT,
+    texto_auto TEXT DEFAULT '',                  -- borrador automático (Whisper), si está configurado
+    nota TEXT DEFAULT '',
+    auto_estado TEXT NOT NULL DEFAULT '',        -- '' | pendiente | procesando | listo | error (ver transcripcion_auto.py)
+    auto_en TEXT DEFAULT '', auto_intentos INTEGER NOT NULL DEFAULT 0, auto_error TEXT DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS frases (
+    id INTEGER PRIMARY KEY,
+    tipo TEXT NOT NULL DEFAULT 'hallazgo',       -- hallazgo | conclusion
+    modalidad TEXT NOT NULL DEFAULT '',          -- vacío = todas
+    atajo TEXT DEFAULT '',                       -- se escribe .atajo + espacio en el editor
+    titulo TEXT NOT NULL,
+    texto TEXT NOT NULL,
+    activo INTEGER NOT NULL DEFAULT 1
+);
+
+CREATE TABLE IF NOT EXISTS entregas (
+    id INTEGER PRIMARY KEY,
+    estudio_id TEXT NOT NULL,
+    tipo TEXT NOT NULL,                          -- retiro | cd | placas | impreso | email | otro
+    detalle TEXT DEFAULT '',
+    usuario_id INTEGER, creado TEXT NOT NULL,
+    anulado INTEGER NOT NULL DEFAULT 0, anulado_por INTEGER, anulado_en TEXT
+);
+
+CREATE TABLE IF NOT EXISTS notas (
+    id INTEGER PRIMARY KEY,
+    estudio_id TEXT NOT NULL,
+    usuario_id INTEGER NOT NULL,
+    texto TEXT DEFAULT '',
+    archivo TEXT DEFAULT '', archivo_nombre TEXT DEFAULT '',
+    creado TEXT NOT NULL,
+    eliminado INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS filtros (
+    id INTEGER PRIMARY KEY,
+    usuario_id INTEGER NOT NULL,
+    nombre TEXT NOT NULL,
+    query TEXT NOT NULL
+);
+
+-- Equipos autorizados a enviar estudios por internet (lista blanca DICOM)
+CREATE TABLE IF NOT EXISTS equipos (
+    id INTEGER PRIMARY KEY,
+    nombre TEXT NOT NULL,                        -- ej: TC Rancagua
+    centro TEXT DEFAULT '',
+    aet TEXT NOT NULL,                           -- AE Title propio del equipo
+    ip TEXT NOT NULL,                            -- IP pública fija del centro
+    activo INTEGER NOT NULL DEFAULT 1,
+    notas TEXT DEFAULT '',
+    creado TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS ajustes (
+    clave TEXT PRIMARY KEY,
+    valor TEXT NOT NULL DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS ix_informes_estado ON informes(estado);
+CREATE INDEX IF NOT EXISTS ix_dictados_estudio ON dictados(estudio_id);
+CREATE INDEX IF NOT EXISTS ix_dictados_estado ON dictados(estado);
+CREATE INDEX IF NOT EXISTS ix_entregas_estudio ON entregas(estudio_id);
+CREATE INDEX IF NOT EXISTS ix_notas_estudio ON notas(estudio_id);
+CREATE INDEX IF NOT EXISTS ix_links_informe ON links(informe_id);
+CREATE INDEX IF NOT EXISTS ix_auditoria_ts ON auditoria(ts);
+"""
+
+PLANTILLAS_INICIALES = [   # pacs-rismed: solo mamografía (modalidad MG; con CR algunos lectores envían CR)
+    ("Mamografía bilateral normal", "MG,CR", """TÉCNICA:
+Mamografía bilateral digitalizada (CR), en proyecciones craneocaudal (CC) y oblicua mediolateral (OML).
+
+ANTECEDENTES:
+______
+
+HALLAZGOS:
+Mamas de composición ___ (patrón ACR ___).
+No se observan nódulos, distorsiones de la arquitectura ni asimetrías significativas.
+No se observan microcalcificaciones sospechosas.
+Piel y complejo areola-pezón sin alteraciones.
+Regiones axilares sin adenopatías de aspecto patológico.
+
+IMPRESIÓN:
+Mamografía bilateral sin hallazgos sospechosos de malignidad.
+BI-RADS 1: negativo.
+Se sugiere control mamográfico según edad y factores de riesgo."""),
+    ("Mamografía bilateral con hallazgos", "MG,CR", """TÉCNICA:
+Mamografía bilateral digitalizada (CR), en proyecciones craneocaudal (CC) y oblicua mediolateral (OML).
+
+ANTECEDENTES:
+______
+
+COMPARACIÓN:
+Se compara con estudio previo del ___ / sin estudios previos disponibles.
+
+HALLAZGOS:
+Mamas de composición ___ (patrón ACR ___).
+Mama derecha: ______
+Mama izquierda: ______
+Regiones axilares: ______
+
+IMPRESIÓN:
+______
+BI-RADS ___."""),
+    ("Mamografía unilateral", "MG,CR", """TÉCNICA:
+Mamografía unilateral ___ digitalizada (CR), en proyecciones craneocaudal (CC) y oblicua mediolateral (OML).
+
+ANTECEDENTES:
+______
+
+HALLAZGOS:
+
+
+IMPRESIÓN:
+
+BI-RADS ___."""),
+    ("Proyección complementaria", "MG,CR", """TÉCNICA:
+Proyección complementaria ___ de la mama ___ (compresión focalizada / magnificación / axilar).
+
+HALLAZGOS:
+
+
+IMPRESIÓN:
+
+BI-RADS ___."""),
+]
+
+
+FRASES_INICIALES = [
+    ("hallazgo", "MG,CR", "acra", "Composición ACR A", "Mamas de composición predominantemente grasa (patrón ACR A)."),
+    ("hallazgo", "MG,CR", "acrb", "Composición ACR B", "Mamas con áreas dispersas de densidad fibroglandular (patrón ACR B)."),
+    ("hallazgo", "MG,CR", "acrc", "Composición ACR C",
+     "Mamas heterogéneamente densas (patrón ACR C), lo que podría ocultar pequeñas lesiones."),
+    ("hallazgo", "MG,CR", "acrd", "Composición ACR D",
+     "Mamas extremadamente densas (patrón ACR D), lo que disminuye la sensibilidad de la mamografía."),
+    ("hallazgo", "MG,CR", "nodulo", "Nódulo",
+     "Nódulo ___ de ___ mm, de contornos ___, en el cuadrante ___ de la mama ___, a ___ cm del pezón."),
+    ("hallazgo", "MG,CR", "calcben", "Calcificaciones benignas",
+     "Calcificaciones de aspecto benigno (___), sin agrupaciones sospechosas."),
+    ("hallazgo", "MG,CR", "microcalc", "Microcalcificaciones",
+     "Grupo de microcalcificaciones ___ de distribución ___ en el cuadrante ___ de la mama ___, de ___ mm de extensión."),
+    ("hallazgo", "MG,CR", "asim", "Asimetría", "Asimetría ___ en el cuadrante ___ de la mama ___."),
+    ("hallazgo", "MG,CR", "axila", "Axilas normales", "Regiones axilares sin adenopatías de aspecto patológico."),
+    ("hallazgo", "MG,CR", "estable", "Sin cambios", "Sin cambios significativos respecto al estudio previo del ___."),
+    ("conclusion", "MG,CR", "br0", "BI-RADS 0",
+     "BI-RADS 0: evaluación incompleta. Se sugiere complementar con ___ (ecografía mamaria / proyecciones adicionales)."),
+    ("conclusion", "MG,CR", "br1", "BI-RADS 1", "BI-RADS 1: negativo. Se sugiere control mamográfico según edad y factores de riesgo."),
+    ("conclusion", "MG,CR", "br2", "BI-RADS 2", "BI-RADS 2: hallazgos benignos. Se sugiere control mamográfico habitual."),
+    ("conclusion", "MG,CR", "br3", "BI-RADS 3",
+     "BI-RADS 3: hallazgo probablemente benigno. Se sugiere control a corto plazo en 6 meses."),
+    ("conclusion", "MG,CR", "br4", "BI-RADS 4",
+     "BI-RADS 4___: hallazgo sospechoso. Se sugiere estudio histológico."),
+    ("conclusion", "MG,CR", "br5", "BI-RADS 5",
+     "BI-RADS 5: hallazgo altamente sugerente de malignidad. Se sugiere estudio histológico."),
+    ("conclusion", "MG,CR", "eco", "Complementar con ecografía", "Se sugiere complementar con ecografía mamaria."),
+    ("conclusion", "", "correlacion", "Correlación clínica", "Se sugiere correlación clínica."),
+]
+
+AJUSTES_INICIALES = {
+    "correo_asunto": "Su informe de {centro} está disponible",
+    "correo_cuerpo": (
+        "Estimado(a) {paciente}:\n\n"
+        "El informe de su examen {examen} del {fecha} ya está disponible.\n\n"
+        "Puede verlo, descargarlo y revisar sus imágenes aquí:\n{link}\n{linea_clave}\n"
+        "Adjuntamos también el informe en PDF.\n\n"
+        "Atentamente,\n{centro}\n{telefono_centro}"),
+    "envio_auto_email": "0",                     # 1 = enviar correo al validar si hay email del paciente
+    "webhook_url": "",                           # URL que recibe un aviso (POST JSON) al validar
+    "horas_alerta": "24",                        # horas sin informar antes de marcar en rojo
+    "horas_alerta_urgente": "2",
+    # 1 = al terminar la transcripción de un dictado, el informe queda validado a nombre del médico que dictó
+    "validar_al_transcribir": "1",
+}
+
+
+def ajuste(clave, defecto=""):
+    fila = get_db().execute("SELECT valor FROM ajustes WHERE clave=?", (clave,)).fetchone()
+    return fila["valor"] if fila else AJUSTES_INICIALES.get(clave, defecto)
+
+
+def ahora():
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _columnas(con, tabla):
+    return {r[1] for r in con.execute(f"PRAGMA table_info({tabla})")}
+
+
+def _migrar(con):
+    """Actualiza bases de datos creadas por versiones anteriores."""
+    from permisos import DESC_SOLICITANTES, PERFILES_INICIALES, PERMISOS_NUEVOS, ROL_A_PERFIL
+    cols = _columnas(con, "usuarios")
+    for col in ("centros", "filtro_solicitante"):
+        if col not in cols:
+            con.execute(f"ALTER TABLE usuarios ADD COLUMN {col} TEXT DEFAULT ''")
+    if "perfil_id" not in cols:
+        con.execute("ALTER TABLE usuarios ADD COLUMN perfil_id INTEGER")
+    cols = _columnas(con, "informes")
+    for col, tipo in (("hora_estudio", "TEXT DEFAULT ''"), ("transcrito_por", "INTEGER"),
+                      ("transcrito_en", "TEXT"), ("archivo", "TEXT DEFAULT ''")):
+        if col not in cols:
+            con.execute(f"ALTER TABLE informes ADD COLUMN {col} {tipo}")
+    # Perfiles que solo ven los estudios que tienen asignados (radiólogos)
+    if "solo_asignados" not in _columnas(con, "perfiles"):
+        con.execute("ALTER TABLE perfiles ADD COLUMN solo_asignados INTEGER NOT NULL DEFAULT 0")
+    # archivo: informe final subido ya firmado (PDF). Si existe, es el PDF oficial del informe.
+    if "origen" not in _columnas(con, "estudio_accesos"):
+        con.execute("ALTER TABLE estudio_accesos ADD COLUMN origen TEXT DEFAULT ''")
+    # solicitante_manual: médico solicitante escrito a mano en el examen (sin usuario ni acceso)
+    if "solicitante_manual" not in _columnas(con, "estudio_meta"):
+        con.execute("ALTER TABLE estudio_meta ADD COLUMN solicitante_manual TEXT DEFAULT ''")
+    if "archivo" not in _columnas(con, "informe_versiones"):
+        con.execute("ALTER TABLE informe_versiones ADD COLUMN archivo TEXT DEFAULT ''")
+    # Paleta de colores por usuario y eliminación de usuarios
+    cols_u = _columnas(con, "usuarios")
+    if "paleta" not in cols_u:
+        con.execute("ALTER TABLE usuarios ADD COLUMN paleta TEXT NOT NULL DEFAULT ''")
+    if "eliminado" not in cols_u:
+        con.execute("ALTER TABLE usuarios ADD COLUMN eliminado INTEGER NOT NULL DEFAULT 0")
+    # Transcripción automática de dictados (cola con reintentos)
+    cols = _columnas(con, "dictados")
+    for col, tipo in (("auto_estado", "TEXT NOT NULL DEFAULT ''"), ("auto_en", "TEXT DEFAULT ''"),
+                      ("auto_intentos", "INTEGER NOT NULL DEFAULT 0"), ("auto_error", "TEXT DEFAULT ''")):
+        if col not in cols:
+            con.execute(f"ALTER TABLE dictados ADD COLUMN {col} {tipo}")
+    if "auto_estado" not in cols:  # dictados que ya tenían borrador de la versión anterior
+        con.execute("UPDATE dictados SET auto_estado='listo' WHERE texto_auto != ''")
+
+    # Permisos nuevos de esta versión → a los perfiles de fábrica que ya existían (una sola vez por permiso)
+    hay_perfiles = con.execute("SELECT COUNT(*) FROM perfiles").fetchone()[0] > 0
+    fila = con.execute("SELECT valor FROM ajustes WHERE clave='permisos_migrados'").fetchone()
+    migrados = set((fila[0] if fila else "").split(","))
+    for permiso in PERMISOS_NUEVOS:
+        if permiso in migrados:
+            continue
+        if hay_perfiles:
+            for clave, _, _, permisos, _ in PERFILES_INICIALES:
+                if permiso not in permisos:
+                    continue
+                f = con.execute("SELECT id, permisos FROM perfiles WHERE clave=?", (clave,)).fetchone()
+                if f and permiso not in f[1].split(","):
+                    con.execute("UPDATE perfiles SET permisos=? WHERE id=?",
+                                (",".join(p for p in (f[1].split(",") + [permiso]) if p), f[0]))
+        migrados.add(permiso)
+    con.execute("INSERT OR REPLACE INTO ajustes (clave, valor) VALUES ('permisos_migrados', ?)",
+                (",".join(sorted(p for p in migrados if p)),))
+
+    # Perfiles iniciales (solo si no existen; después los edita el administrador)
+    for clave, nombre, desc, permisos, solo in PERFILES_INICIALES:
+        con.execute("INSERT OR IGNORE INTO perfiles (clave, nombre, descripcion, permisos, solo_solicitados) "
+                    "VALUES (?,?,?,?,?)", (clave, nombre, desc, ",".join(permisos), solo))
+    # Una sola vez: el perfil Radiólogos pasa a ver solo lo asignado (los tecnólogos asignan)
+    # «Médicos de Consultas» pasa a llamarse «Médicos solicitantes» (solo si no le cambiaron el nombre)
+    con.execute("UPDATE perfiles SET nombre='Médicos solicitantes', descripcion=? WHERE clave='medicos_consulta' "
+                "AND nombre='Médicos de Consultas'", (DESC_SOLICITANTES,))
+    if not con.execute("SELECT 1 FROM ajustes WHERE clave='solo_asignados_migrado'").fetchone():
+        con.execute("UPDATE perfiles SET solo_asignados=1 WHERE clave='radiologos'")
+        con.execute("INSERT OR REPLACE INTO ajustes (clave, valor) VALUES ('solo_asignados_migrado', '1')")
+    # Usuarios de la versión con roles fijos → perfil equivalente
+    for uid, rol in con.execute("SELECT id, rol FROM usuarios WHERE perfil_id IS NULL").fetchall():
+        clave = ROL_A_PERFIL.get(rol or "", "tecnico")
+        pid = con.execute("SELECT id FROM perfiles WHERE clave=?", (clave,)).fetchone()[0]
+        con.execute("UPDATE usuarios SET perfil_id=? WHERE id=?", (pid, uid))
+
+
+def get_db():
+    if "db" not in g:
+        path = os.path.join(current_app.config["DATA_DIR"], "informes.db")
+        g.db = sqlite3.connect(path, timeout=30)
+        g.db.row_factory = sqlite3.Row
+        g.db.execute("PRAGMA foreign_keys = ON")
+    return g.db
+
+
+def close_db(_=None):
+    db = g.pop("db", None)
+    if db is not None:
+        db.close()
+
+
+def init_db(app):
+    os.makedirs(app.config["DATA_DIR"], exist_ok=True)
+    for sub in ("firmas", "dictados", "adjuntos", "informes_firmados"):
+        os.makedirs(os.path.join(app.config["DATA_DIR"], sub), exist_ok=True)
+    path = os.path.join(app.config["DATA_DIR"], "informes.db")
+    con = sqlite3.connect(path, timeout=30)
+    con.execute("PRAGMA journal_mode=WAL")
+    con.executescript(SCHEMA)
+    # Bloqueo para que varios procesos (gunicorn) no migren ni siembren datos dos veces
+    con.execute("BEGIN IMMEDIATE")
+    _migrar(con)
+
+    # Primer administrador
+    if con.execute("SELECT COUNT(*) FROM usuarios").fetchone()[0] == 0:
+        clave = app.config["ADMIN_PASSWORD"]
+        if not clave:
+            raise RuntimeError("Define ADMIN_PASSWORD en .env para crear el primer usuario.")
+        admin_id = con.execute("SELECT id FROM perfiles WHERE clave='admin'").fetchone()[0]
+        con.execute(
+            "INSERT INTO usuarios (usuario, nombre, clave_hash, rol, perfil_id, creado) VALUES (?,?,?,?,?,?)",
+            (app.config["ADMIN_USER"], "Administrador", generate_password_hash(clave), "admin", admin_id, ahora()),
+        )
+
+    if con.execute("SELECT COUNT(*) FROM plantillas").fetchone()[0] == 0:
+        con.executemany(
+            "INSERT INTO plantillas (nombre, modalidad, cuerpo) VALUES (?,?,?)", PLANTILLAS_INICIALES
+        )
+    if con.execute("SELECT COUNT(*) FROM frases").fetchone()[0] == 0:
+        con.executemany(
+            "INSERT INTO frases (tipo, modalidad, atajo, titulo, texto) VALUES (?,?,?,?,?)", FRASES_INICIALES
+        )
+    for k, v in AJUSTES_INICIALES.items():
+        con.execute("INSERT OR IGNORE INTO ajustes (clave, valor) VALUES (?,?)", (k, v))
+    con.commit()
+    con.close()
+    app.teardown_appcontext(close_db)
+
+
+def auditar(usuario, accion, detalle="", ip=""):
+    db = get_db()
+    db.execute(
+        "INSERT INTO auditoria (ts, usuario, accion, detalle, ip) VALUES (?,?,?,?,?)",
+        (ahora(), usuario, accion, detalle, ip),
+    )
+    db.commit()

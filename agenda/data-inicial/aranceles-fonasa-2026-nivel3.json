@@ -1,0 +1,11 @@
+{
+ "version": 1,
+ "fuente": "FONASA, Libro Arancel MLE 2026 (Modalidad Libre Elección), grupo 04 Imagenología, subgrupo 01: mamografía. Nivel 3.",
+ "url": "https://www.fonasa.gob.cl/wp-content/uploads/sites/3/2026/03/1-Libro-Arancel-MLE-2026.pdf",
+ "nota": "En el libro, cada nivel tiene las columnas TOTAL y BENEF; BENEF es lo que paga el beneficiario (copago). La bonificación Fonasa es TOTAL - BENEF y es igual en los tres niveles.",
+ "prestaciones": [
+  {"codigo": "0401010", "nombre": "Mamografía bilateral", "equipo": "mx", "fonasa_total": 37600, "fonasa_bonif": 11750},
+  {"codigo": "0401110", "nombre": "Mamografía unilateral", "equipo": "mx", "fonasa_total": 22080, "fonasa_bonif": 6900},
+  {"codigo": "0401130", "nombre": "Mamografía proyección complementaria (axilar u otras)", "equipo": "mx", "fonasa_total": 8060, "fonasa_bonif": 2520}
+ ]
+}

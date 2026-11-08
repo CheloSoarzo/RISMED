@@ -1,0 +1,325 @@
+# Agenda + PACS en Vultr: guía de puesta en marcha
+
+Con esto, la agenda y el PACS de cada centro quedan en el mismo servidor y trabajan juntos:
+
+1. **Al agendar**, la cita recibe un **número de acceso** (ej. `RAN00001234`).
+2. **Al pagar**, si el paciente no tenía clave se crea una y se imprime la **hoja de retiro** con la dirección,
+   su RUT y su clave.
+3. **En el equipo**, el tecnólogo abre la **lista de trabajo (worklist)** y elige al paciente: nombre, RUT,
+   examen y número de acceso ya vienen escritos.
+4. **El estudio llega al PACS** con ese número y queda unido a la cita. El radiólogo ve la orden de la agenda
+   (examen pedido, médico y notas de recepción) dentro del estudio.
+5. **En la agenda**, cada cita muestra su avance: *imágenes* → *informado* → *entregado*.
+6. **El paciente** entra a `examenes.inq.cl/mamo` con su RUT y su clave. Ve "informe en proceso" hasta que
+   el radiólogo firma, y después puede ver el informe, descargar el PDF y ver las imágenes.
+
+El centro tiene su agenda, su PACS y su base de datos, en su propio servidor.
+
+---
+
+## Parte 1 · Código
+
+En pacs-rismed la agenda viene dentro de este mismo repositorio (carpeta `agenda/`): no hay un segundo
+repositorio ni token aparte para la agenda. El token del repositorio se pone una sola vez en el Cloud-Init.
+
+---
+
+## Parte 2 · Actualizar el servidor Vultr
+
+Entra al servidor por consola (Vultr → tu servidor → **View Console**, o `ssh root@IP`).
+
+- **Si el servidor ya está instalado:**
+
+  ```
+  pacs actualizar
+  ```
+
+- **Si aún no lo creas:** sigue «Instalación automática» del `README.md`. Usa el mismo Cloud-Init de siempre,
+  que ya instala esta versión.
+
+---
+
+## Parte 3 · Probar con pacientes de prueba (marcha blanca)
+
+Antes de mover la agenda real, prueba todo con datos inventados en una dirección aparte.
+
+1. En **Cloudflare → DNS → Add record**: tipo **A**, nombre `pruebaagenda`, valor = **IP del servidor Vultr**,
+   nube **gris** (DNS only).
+2. En el servidor:
+
+   ```
+   pacs agenda mamo pruebaagenda.inq.cl
+   ```
+
+   Anota el usuario `admin` y la clave que muestra.
+3. Entra a `https://pruebaagenda.inq.cl`, agenda un paciente de prueba **para hoy** con un RUT válido y cóbralo.
+   Debe aparecer la **clave** y el botón **Imprimir hoja de retiro**.
+4. **En el equipo** (empieza con uno solo, por ejemplo RX):
+   - El equipo ya debe estar registrado en el PACS (**Administración → Equipos**), igual que para enviar estudios.
+   - En la configuración DICOM del equipo, busca **Worklist / MWL / RIS** y agrega un servidor con los mismos datos
+     del PACS: **IP del servidor**, **puerto DICOM** del centro y **AE Title** del PACS (`pacs lista` los muestra).
+   - Busca la lista del día: debe aparecer el paciente de prueba. Hazle un examen de prueba y envíalo.
+5. Revisa que:
+   - el estudio llegue al PACS con el **N° de examen** igual al de la cita y con el recuadro **Orden de agenda**;
+   - en la agenda la cita diga **imágenes** al minuto siguiente;
+   - al firmar el informe, la agenda diga **informado**;
+   - el paciente de prueba, entrando a `https://pacsmamo.inq.cl/paciente` con RUT y clave, vea primero
+     "informe en proceso" y después **Ver informe e imágenes**.
+
+**Si el equipo no muestra la lista:**
+- Prueba buscando sin filtro de modalidad ni de AE Title.
+- Para el mamógrafo la lista sale como modalidad `MG`. Si el lector CR pide `CR`, en `/opt/pacs-instancias/mamo/.env`
+  cambia `MWL_MODALIDAD_MX=CR` y ejecuta `pacs iniciar mamo`.
+- Si quieres que aparezcan todos los agendados, no solo los que ya pagaron, usa `MWL_INCLUIR=todos`.
+- Revisa los registros con `pacs logs mamo`.
+
+---
+
+## Parte 4 · Pasar la agenda real de Render a Vultr
+
+Hazlo a una hora tranquila, por ejemplo al cierre del día, después de cerrar la caja.
+
+1. **En la agenda de Render** (Rancagua), pulsa **Respaldo**. Se descarga `agenda-respaldo-AAAA-MM-DD-HH-MM.db`.
+2. **Súbelo al servidor** desde tu computador, en PowerShell (Windows) o Terminal (Mac):
+
+   ```
+   scp agenda-respaldo-AAAA-MM-DD-HH-MM.db root@IP_DEL_SERVIDOR:/root/
+   ```
+
+3. **En el servidor**, cambia la agenda a su dirección definitiva y carga el respaldo:
+
+   ```
+   pacs agenda mamo agendarancagua.inq.cl
+   pacs agenda-importar rancagua /root/agenda-respaldo-AAAA-MM-DD-HH-MM.db
+   ```
+
+   Esto borra las citas de prueba de la Parte 3. Borra también en el PACS los estudios del paciente de prueba.
+4. **En Cloudflare**, edita el registro `agendarancagua`: cambia el tipo **CNAME** (a Render) por **A**, con la
+   **IP del servidor Vultr** y la nube **gris**. Borra el registro `pruebaagenda`.
+5. Espera 2 a 5 minutos y entra a `https://agendarancagua.inq.cl` con los **mismos usuarios de siempre**.
+   Revisa que estén las citas de mañana y la caja de hoy.
+6. **Deja Render encendido unas semanas como respaldo, pero sin usarlo.** Si lo usas, las citas quedarían
+   repartidas en dos lugares. Cuando estés conforme, suspende el servicio en Render.
+
+Repite los pasos para **INSI** con `insi` y `agendainsi.inq.cl`.
+
+---
+
+## Parte 5 · Portal común `examenes.inq.cl`
+
+1. En **Cloudflare**: registro **A**, nombre `examenes`, valor = **IP del servidor**, nube **gris**.
+2. En el servidor:
+
+   ```
+   pacs portal examenes.inq.cl
+   ```
+
+`https://examenes.inq.cl` muestra un botón por centro para pacientes y los accesos del personal. Desde ese momento,
+la hoja de retiro imprime la dirección corta de cada centro (ej. `examenes.inq.cl/mamo`), que lleva directo al
+ingreso del paciente.
+
+---
+
+## Panel de servidores (`examenes.inq.cl/panel`)
+
+Una página para elegir a qué PACS entrar, con una tarjeta por centro: espacio usado, estudios, dictados, informes
+validados, pendientes por validar y por transcribir, y botones **Entrar al PACS**, **Agenda** y **Datos DICOM**
+(IP, puerto y AE Title, para configurar equipos).
+
+1. Primero crea el portal (Parte 5).
+2. Ponle clave al panel. Pide la clave dos veces y no se ve al escribirla:
+
+   ```
+   pacs panel-clave
+   ```
+
+3. Entra a `https://examenes.inq.cl/panel` con usuario `admin` y esa clave. Desde la página del portal también hay
+   un botón **Panel de servidores**.
+
+Los números se actualizan solos cada 5 minutos (o al momento con `pacs estado`). El **Total** es el disco del
+servidor. Para un PACS con espacio contratado (por ejemplo, uno arrendado), fija su límite y el panel mostrará el
+porcentaje sobre ese límite:
+
+```
+pacs cuota rismed 50
+```
+
+## Aceptar equipos solo por AE Title (sin IP fija)
+
+Si la IP pública de un centro cambia (por ejemplo, porque su red sale a internet a través de un servicio de
+seguridad o de dos proveedores), el PACS puede aceptar a los equipos **solo por su AE Title**, desde cualquier IP:
+
+```
+pacs dicom-modo insi aetitle
+```
+
+En **Administración → Equipos DICOM** la IP pasa a ser opcional. Como el puerto queda abierto a internet, el AE Title
+funciona como una clave: usa uno de 8 o más letras y números, distinto para cada equipo (la pantalla sugiere uno).
+Los AE Title fáciles de adivinar aparecen marcados como **AE débil**. Para volver a exigir la IP:
+`pacs dicom-modo insi ip`.
+
+## Informe ya firmado por el médico (Subir informe firmado)
+
+Cuando el informe viene terminado y firmado fuera del sistema, en el estudio se usa **📄 Subir informe firmado**:
+se elige el archivo (PDF, o foto/escaneo JPG o PNG) y el médico que lo firmó. El archivo se guarda tal cual, el
+estudio queda **validado** a nombre de ese médico y ese archivo es el que recibe el paciente. Word no se acepta:
+hay que guardarlo como PDF. Para cambiarlo: **Rectificar** y subir el nuevo. Permiso: «Subir el informe final ya
+firmado» (Transcripcionistas, Radiólogos y Administradores).
+
+## Asignación de exámenes a radiólogos
+
+Los **tecnólogos** asignan cada examen a un radiólogo: en el estudio (recuadro «Radiólogo asignado», con prioridad
+normal o urgente) o varios a la vez desde la lista (casillas → Asignar). Los usuarios del perfil **Radiólogos**
+solo ven los exámenes que tienen asignados (lista, búsqueda, estudio, visor y dictado) y ya no pueden tomarlos por
+su cuenta. Se configura en **Administración → Perfiles y permisos** con la casilla «Solo ve los estudios que tiene
+asignados»; el permiso para asignar es «Asignar radiólogo».
+
+## Informe dictado: validado por el médico al terminar la transcripción
+
+Con el ajuste **Administración → Correo y ajustes → «Validación de informes dictados»** (activo por defecto), cuando la
+transcripcionista termina un dictado su botón dice **✓ Terminar y validar (Dr. X)**: el informe queda validado y
+firmado a nombre del médico que dictó, sin pasar por «Por validar». En el PDF sale su imagen de firma (se carga en
+**Administración → Usuarios**), nombre, título y registro. Queda en la auditoría y el médico puede rectificarlo.
+Si no hay dictado, o el ajuste está desactivado, el informe sigue el camino normal de validación.
+
+## Corregir un error en un informe validado
+
+Los **tecnólogos** y las **transcripcionistas** ven en el estudio **Corregir error en el informe**: editan el texto,
+indican qué se corrigió y guardan. El informe vuelve a quedar validado por el **mismo médico** como nueva versión;
+la versión anterior queda en el historial, la corrección en la auditoría, y el paciente la ve con el mismo link y QR.
+Permiso: «Corregir errores en informes validados». Los informes subidos como archivo firmado se cambian con
+**Rectificar** y subiendo el archivo corregido.
+
+## Código QR en el informe
+
+Todo informe validado trae un código QR que abre el informe y las **imágenes** en el celular, con la **clave de
+acceso** impresa al lado. En los informes subidos ya firmados, el QR va en una página final agregada al archivo.
+
+## Ficha del paciente y botón «Ver en el PACS»
+
+La **ficha del paciente** reúne por **RUT** todos sus exámenes en el PACS, de cualquier fecha y modalidad
+(con su estado, el ícono para abrir el informe y el botón «Ver»), más sus citas de la agenda que aún no tienen
+imágenes. Se abre:
+
+- desde la agenda, con **«Ver en el PACS ↗»** al abrir una cita: llega a la ficha con ese examen marcado
+  («desde la agenda»);
+- desde la ficha de cualquier estudio en el PACS, con el botón **«Ficha del paciente»**.
+
+Se entra con el usuario del PACS: cada uno ve solo los exámenes que su perfil permite (un radiólogo, solo los
+asignados; los perfiles restringidos no ven teléfono, correo ni citas de la agenda). Queda en la auditoría.
+
+## Médicos solicitantes (ver sus exámenes con su usuario)
+
+**Lo normal es elegirlo en la agenda:** al agendar, «Médico solicitante» es una lista con los médicos del centro
+(los usuarios del PACS con perfil «Médicos solicitantes») y la opción «✎ Otro médico (escribir el nombre)…».
+Cuando llegan las imágenes y el examen se une a la cita, el médico elegido recibe acceso solo (etiqueta «agenda»)
+y queda como médico solicitante del examen y del informe. Si se cambia el médico en la cita, el anterior pierde
+el acceso. Lo que sigue sirve para dar acceso a mano desde el PACS (por ejemplo, a un segundo médico).
+
+1. Crea al médico en **Administración → Usuarios** con el perfil **«Médicos solicitantes»**. El campo «su nombre
+   como aparece en los exámenes» es opcional: si lo llenas, además ve solo los exámenes donde figura como solicitante.
+2. En la ficha del examen, bajo «Radiólogo asignado», está **«Médicos solicitantes»**: eliges al médico del centro en
+   la lista y presionas **Dar acceso**. Si el nombre del solicitante del examen coincide, viene preseleccionado.
+   Lo pueden hacer administrador, tecnólogos y recepción (permiso «Dar acceso a un médico solicitante»).
+3. El médico entra con su usuario y ve en su lista solo esos exámenes (de cualquier fecha), con imágenes en el visor
+   y el informe validado. Se quita el acceso con la × junto a su nombre. Todo queda en la auditoría.
+4. **Otro médico (sin acceso):** en la misma lista, «✎ Otro médico (escribir el nombre)…». Se escribe el nombre y
+   queda como médico solicitante del examen y del informe (si aún no está validado), sin usuario ni acceso.
+
+## Agenda: colores de estado y cargar respaldo
+
+- **Usuarios por agenda:** en Usuarios, cada usuario (no administrador) tiene casillas TC / RX / ECO con las agendas
+  que ve; sin ninguna marcada ve todas. No ve, ni puede agendar, en las demás.
+- **Solo lectura:** no ve Caja, Aranceles, valores, copagos ni medios de pago (solo que la cita está pagada).
+- **Comentario en la agenda:** las notas de la cita se ven junto al nombre del paciente (💬).
+- **Horas cada 15 minutos:** la duración por defecto es 15 minutos en los tres equipos.
+- **Dos medios de pago:** al cobrar, «+ Pagar con dos medios de pago»: segundo medio y su monto; el resto va al
+  primero. La caja reparte el monto entre ambos medios (y el efectivo esperado cuenta solo la parte en efectivo).
+
+- **Colores:** cada cita se pinta según su estado: Agendado (azul grisáceo), Confirmado (verde), **En espera**
+  (amarillo; antes se llamaba «Llegó»), Atendido (café claro), No asistió (rojo claro, tachado), Cancelado (gris, tachado).
+- **Cargar respaldo** (administrador, junto a «Respaldo»): se elige el archivo .db, se ve cuántas citas, pagos y
+  usuarios tiene la agenda y el respaldo, y escribiendo RESTAURAR se reemplazan **todos** los datos de la agenda.
+  Antes se guarda una copia automática en el servidor (carpeta de datos de la agenda → respaldos/antes-de-restaurar-…db).
+  Todos vuelven a iniciar sesión con los usuarios del respaldo. El PACS recibe las citas restauradas y borra las
+  órdenes que ya no existen. Si una cita del respaldo trae un número de acceso que en esta agenda era de otro
+  paciente, recibe uno nuevo (termina en R1, R2…) para no mezclarse con imágenes de otro paciente.
+
+## Horos / OsiriX
+
+- **Nodo DICOM listo:** en Administración → Equipos, sección «Horos / OsiriX», botón «Descargar nodo DICOM para Horos»
+  (archivo .plist). En Horos: Preferencias → Ubicaciones → Importar… Queda el PACS con recuperación C-GET.
+  Luego registra el AE Title de tu Horos (Preferencias → Escucha) como un equipo más en esa misma pantalla.
+- **Abrir en Horos / OsiriX:** en cada estudio, junto a «Descargar DICOM». Crea un enlace temporal (15 minutos,
+  3 usos) del ZIP del estudio y abre Horos u OsiriX, que lo descarga, importa y muestra. Queda en la auditoría.
+
+## Grabar CD / DVD del paciente con visor
+
+En la lista de estudios, al final de cada fila, hay un **ícono de disco** (también el botón «Grabar CD» en la ficha del
+estudio). Lo ven el administrador, los tecnólogos y recepción (permiso «Preparar el CD/DVD del paciente»).
+
+1. La ventana muestra el tamaño y si **cabe en un CD** (700 MB) o **necesita un DVD**.
+2. **Preparar disco**: el servidor arma la imagen del disco (.iso) en segundo plano y se descarga sola. Si está marcado,
+   queda registrada la entrega «CD grabado».
+3. Se graba con lo que trae el computador: **Windows**, clic derecho sobre el .iso → «Grabar imagen de disco»;
+   **Mac**, clic derecho → «Grabar imagen de disco en disco».
+
+El disco lleva las imágenes originales con **DICOMDIR** (se abren en Horos, OsiriX, RadiAnt, Weasis…), el
+**visor ABRIR_VISOR.HTML** (doble clic: se abre en el navegador sin instalar nada, con series, recorrido de cortes,
+brillo, contraste y zoom), el **informe en PDF** si está validado y un LEAME con instrucciones.
+Los discos preparados se borran del servidor a las 6 horas.
+
+## Borrar un examen
+
+Para exámenes de prueba, enviados al paciente equivocado o duplicados. En la **lista de estudios**, al final de cada
+fila hay un **tarro de basura** que abre la ventana de borrado; también está **«Borrar examen»** al final de la ficha
+del estudio (lo ven el administrador y los tecnólogos; permiso «Borrar exámenes completos»).
+
+- Hay que escribir el **motivo** y la palabra **BORRAR** para confirmar.
+- Si el examen tiene un **informe validado**, además hay que marcar la casilla «Entiendo que el informe validado
+  también se borra». El link y la clave del paciente dejan de mostrarlo.
+- Se borran las imágenes del PACS, el informe con su historial y links, los dictados, las notas y las entregas.
+  **No se puede deshacer.**
+- Queda en la auditoría: paciente, RUT, fecha, examen, número de acceso, si tenía informe validado y por quién, y el motivo.
+- Si estaba unido a una cita, la agenda la vuelve a mostrar **sin imágenes**; si después llega el estudio correcto,
+  se une solo como siempre. Lo mismo pasa al **separar** un estudio de una cita.
+
+## Equipos sin worklist
+
+El worklist es lo ideal, pero no es obligatorio. Los equipos que no lo usen (o mientras lo configuras) igual quedan
+unidos a la agenda:
+
+1. **Automático, por RUT + fecha + tipo de equipo.** Si el tecnólogo escribe en el equipo el **RUT del paciente**
+   como ID (con o sin puntos y guion) y ese día el paciente tiene **una sola cita** de ese tipo (TC, RX o Eco),
+   el PACS la une sola en menos de un minuto.
+2. **Escribiendo el N° de acceso.** Si en el equipo escribe en "Accession Number" el número de la cita (está en la
+   ficha de la cita y en la hoja de retiro), se une igual que con el worklist.
+3. **A mano, desde el estudio.** Si el RUT quedó mal escrito o el paciente tiene dos exámenes iguales el mismo día,
+   el estudio muestra un recuadro amarillo **"Sin cita de agenda"** con las citas posibles (primero las del mismo
+   RUT). Se elige la correcta y se pulsa **Unir con la cita elegida**. Si se unió mal, **No es esta cita** la separa.
+   Lo pueden hacer los perfiles con permiso para corregir datos del paciente (tecnólogos y recepción, por defecto).
+
+La regla para el tecnólogo es simple: **en el ID del paciente, siempre el RUT.**
+
+## Durante la marcha blanca
+
+- **Los equipos envían a los dos PACS** (pacs4me y el nuevo), así nada se pierde si algo falla.
+- **Suma los equipos de a uno** al worklist, cuando el anterior funcione bien.
+- **Respaldos:** cada noche se guardan solos en `/opt/respaldos/<centro>/`, junto con los del PACS
+  (`agenda_AAAA-MM-DD.db`). Sigue bajando también el **Respaldo** desde la agenda.
+- **Si el PACS se reinicia**, la agenda guarda los cambios en cola y los reenvía sola al volver.
+
+## Datos que se usan del paciente
+
+- En el **worklist** van el nombre, el RUT (como `12345678-9`), la fecha de nacimiento, el examen, el médico
+  solicitante y el número de acceso.
+- La **clave** del paciente se guarda solo cifrada, en la agenda y en el PACS. Nadie puede leerla después de impresa:
+  si el paciente la pierde, recepción genera una nueva y la anterior deja de servir.
+- **Ingresos al portal:** tras 8 intentos fallidos en 15 minutos se bloquea el acceso por 15 minutos. Cada ingreso
+  queda en la **Auditoría** del PACS.
+
+## Prueba automática
+
+`dev/prueba_agenda.py` recorre el flujo completo (agendar, pagar, clave, llegada del estudio, firma, portal,
+nueva clave, eliminar cita y bloqueo por intentos), con el PACS simulado y la agenda en el mismo computador.
+Las instrucciones para correrla están al inicio del archivo.

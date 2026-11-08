@@ -1,0 +1,259 @@
+// Base de datos SQLite: usuarios, sesiones y citas.
+const path = require("path");
+const fs = require("fs");
+const { DatabaseSync } = require("node:sqlite");
+
+const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, "data");
+fs.mkdirSync(DATA_DIR, { recursive: true });
+
+const db = new DatabaseSync(path.join(DATA_DIR, "agenda.db"));
+db.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;");
+
+db.exec(`
+CREATE TABLE IF NOT EXISTS usuarios (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  usuario TEXT NOT NULL UNIQUE COLLATE NOCASE,
+  nombre TEXT NOT NULL DEFAULT '',
+  clave_hash TEXT NOT NULL,
+  rol TEXT NOT NULL DEFAULT 'recepcion' CHECK (rol IN ('admin','recepcion','lectura')),
+  activo INTEGER NOT NULL DEFAULT 1,
+  creado TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS sesiones (
+  token TEXT PRIMARY KEY,
+  usuario_id INTEGER NOT NULL REFERENCES usuarios(id) ON DELETE CASCADE,
+  expira INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS citas (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  fecha TEXT NOT NULL,
+  hora TEXT NOT NULL,
+  duracion INTEGER NOT NULL DEFAULT 15,
+  equipo TEXT NOT NULL CHECK (equipo IN ('mx')),
+  paciente TEXT NOT NULL,
+  rut TEXT NOT NULL DEFAULT '',
+  telefono TEXT NOT NULL DEFAULT '',
+  examen TEXT NOT NULL DEFAULT '',
+  prevision TEXT NOT NULL DEFAULT '',
+  medico TEXT NOT NULL DEFAULT '',
+  estado TEXT NOT NULL DEFAULT 'agendado',
+  notas TEXT NOT NULL DEFAULT '',
+  creado_por INTEGER REFERENCES usuarios(id) ON DELETE SET NULL,
+  actualizado_por INTEGER REFERENCES usuarios(id) ON DELETE SET NULL,
+  creado TEXT NOT NULL DEFAULT (datetime('now')),
+  actualizado TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_citas_fecha ON citas(fecha);
+CREATE INDEX IF NOT EXISTS idx_citas_rut ON citas(rut);
+`);
+
+// ---------- módulo de pagos ----------
+db.exec(`
+CREATE TABLE IF NOT EXISTS aranceles (
+  codigo TEXT PRIMARY KEY,
+  nombre TEXT NOT NULL,
+  equipo TEXT NOT NULL CHECK (equipo IN ('mx')),
+  fonasa_total INTEGER NOT NULL DEFAULT 0,   -- valor prestación Fonasa MLE nivel 3
+  fonasa_bonif INTEGER NOT NULL DEFAULT 0,   -- bonificación Fonasa (igual en los 3 niveles)
+  particular INTEGER NOT NULL DEFAULT 0,     -- precio particular del centro (0 = usar valor Fonasa)
+  activo INTEGER NOT NULL DEFAULT 1
+);
+
+CREATE TABLE IF NOT EXISTS pagos (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  cita_id INTEGER REFERENCES citas(id) ON DELETE SET NULL,
+  fecha TEXT NOT NULL,                 -- día de caja
+  paciente TEXT NOT NULL DEFAULT '',
+  rut TEXT NOT NULL DEFAULT '',
+  equipo TEXT NOT NULL DEFAULT '',
+  codigo TEXT NOT NULL DEFAULT '',
+  examen TEXT NOT NULL DEFAULT '',
+  prevision TEXT NOT NULL DEFAULT '',
+  valor INTEGER NOT NULL DEFAULT 0,
+  bonificacion INTEGER NOT NULL DEFAULT 0,
+  copago INTEGER NOT NULL DEFAULT 0,   -- lo que pagó el paciente
+  medio TEXT NOT NULL,
+  folio_bono TEXT NOT NULL DEFAULT '',
+  usuario_id INTEGER REFERENCES usuarios(id) ON DELETE SET NULL,
+  creado TEXT NOT NULL DEFAULT (datetime('now')),
+  anulado INTEGER NOT NULL DEFAULT 0,
+  anulado_por INTEGER REFERENCES usuarios(id) ON DELETE SET NULL,
+  motivo_anulacion TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_pagos_fecha ON pagos(fecha);
+CREATE INDEX IF NOT EXISTS idx_pagos_cita ON pagos(cita_id);
+
+CREATE TABLE IF NOT EXISTS cierres (
+  fecha TEXT PRIMARY KEY,
+  usuario_id INTEGER REFERENCES usuarios(id) ON DELETE SET NULL,
+  creado TEXT NOT NULL DEFAULT (datetime('now')),
+  resumen TEXT NOT NULL,               -- totales en JSON al momento del cierre
+  efectivo_contado INTEGER NOT NULL DEFAULT 0,
+  diferencia INTEGER NOT NULL DEFAULT 0,
+  observaciones TEXT NOT NULL DEFAULT ''
+);
+`);
+
+// Columnas nuevas en citas (para bases creadas con la versión anterior)
+const colsCitas = db.prepare("PRAGMA table_info(citas)").all().map((c) => c.name);
+for (const [col, def] of [["codigo", "TEXT NOT NULL DEFAULT ''"], ["valor", "INTEGER NOT NULL DEFAULT 0"],
+  ["bonificacion", "INTEGER NOT NULL DEFAULT 0"], ["copago", "INTEGER NOT NULL DEFAULT 0"],
+  ["examenes", "TEXT NOT NULL DEFAULT ''"], ["fecha_nac", "TEXT NOT NULL DEFAULT ''"], ["email", "TEXT NOT NULL DEFAULT ''"]]) { // examenes: JSON con el detalle cuando la cita tiene más de un examen
+  if (!colsCitas.includes(col)) db.exec(`ALTER TABLE citas ADD COLUMN ${col} ${def}`);
+}
+
+// ---------- descuentos en pagos ----------
+// copago = lo que pagó el paciente (ya con descuento); descuento = monto rebajado del copago
+{
+  const colsPagos = db.prepare("PRAGMA table_info(pagos)").all().map((c) => c.name);
+  if (!colsPagos.includes("descuento")) db.exec("ALTER TABLE pagos ADD COLUMN descuento INTEGER NOT NULL DEFAULT 0");
+  if (!colsPagos.includes("descuento_motivo")) db.exec("ALTER TABLE pagos ADD COLUMN descuento_motivo TEXT NOT NULL DEFAULT ''");
+  if (!colsPagos.includes("descuento_detalle")) db.exec("ALTER TABLE pagos ADD COLUMN descuento_detalle TEXT NOT NULL DEFAULT ''");
+  if (!colsPagos.includes("examenes")) db.exec("ALTER TABLE pagos ADD COLUMN examenes TEXT NOT NULL DEFAULT ''");
+  if (!colsPagos.includes("boleta")) db.exec("ALTER TABLE pagos ADD COLUMN boleta TEXT NOT NULL DEFAULT ''");
+  // segundo medio de pago (pago dividido): monto2 se paga con medio2 y el resto con medio
+  if (!colsPagos.includes("medio2")) db.exec("ALTER TABLE pagos ADD COLUMN medio2 TEXT NOT NULL DEFAULT ''");
+  if (!colsPagos.includes("monto2")) db.exec("ALTER TABLE pagos ADD COLUMN monto2 INTEGER NOT NULL DEFAULT 0");
+  // agendas que ve el usuario (hoy solo mx: mamografía); vacío = todas
+  const colsU = db.prepare("PRAGMA table_info(usuarios)").all().map((c) => c.name);
+  if (!colsU.includes("agendas")) db.exec("ALTER TABLE usuarios ADD COLUMN agendas TEXT NOT NULL DEFAULT ''");
+  // colores que eligió el usuario ('' = azul) y usuarios eliminados (su nombre queda en el historial de caja y citas)
+  if (!colsU.includes("paleta")) db.exec("ALTER TABLE usuarios ADD COLUMN paleta TEXT NOT NULL DEFAULT ''");
+  if (!colsU.includes("eliminado")) db.exec("ALTER TABLE usuarios ADD COLUMN eliminado INTEGER NOT NULL DEFAULT 0");
+}
+
+// ---------- adjuntos (orden médica) ----------
+// Se guardan dentro de la base de datos para que el respaldo incluya todo en un solo archivo.
+db.exec(`
+CREATE TABLE IF NOT EXISTS adjuntos (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  cita_id INTEGER NOT NULL REFERENCES citas(id) ON DELETE CASCADE,
+  nombre TEXT NOT NULL DEFAULT '',
+  tipo TEXT NOT NULL,
+  tamano INTEGER NOT NULL,
+  datos BLOB NOT NULL,
+  usuario_id INTEGER REFERENCES usuarios(id) ON DELETE SET NULL,
+  creado TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_adjuntos_cita ON adjuntos(cita_id);
+`);
+
+// Arancel Fonasa incluido con la app. Se aplica cuando el archivo trae una versión más nueva que la
+// cargada: inserta códigos nuevos y actualiza valor y bonificación Fonasa, sin tocar el precio
+// particular ni si la prestación está activa. Las citas Fonasa aún no pagadas se recalculan.
+db.exec("CREATE TABLE IF NOT EXISTS meta (clave TEXT PRIMARY KEY, valor TEXT NOT NULL)");
+try {
+  const ini = JSON.parse(fs.readFileSync(path.join(__dirname, "data-inicial", "aranceles-fonasa-2026-nivel3.json"), "utf8"));
+  const cargada = Number(db.prepare("SELECT valor FROM meta WHERE clave = 'arancel_version'").get()?.valor || 0);
+  if ((ini.version || 1) > cargada) {
+    const up = db.prepare(`INSERT INTO aranceles (codigo, nombre, equipo, fonasa_total, fonasa_bonif) VALUES (?,?,?,?,?)
+      ON CONFLICT(codigo) DO UPDATE SET nombre = excluded.nombre, equipo = excluded.equipo,
+      fonasa_total = excluded.fonasa_total, fonasa_bonif = excluded.fonasa_bonif`);
+    db.exec("BEGIN");
+    for (const a of ini.prestaciones) up.run(a.codigo, String(a.nombre).toLocaleUpperCase("es-CL"), a.equipo, a.fonasa_total, a.fonasa_bonif);
+    const r = db.prepare(`UPDATE citas SET
+        valor = (SELECT fonasa_total FROM aranceles a WHERE a.codigo = citas.codigo),
+        bonificacion = (SELECT fonasa_bonif FROM aranceles a WHERE a.codigo = citas.codigo),
+        copago = (SELECT fonasa_total - fonasa_bonif FROM aranceles a WHERE a.codigo = citas.codigo)
+      WHERE prevision = 'Fonasa' AND codigo IN (SELECT codigo FROM aranceles) AND examenes = ''
+        AND NOT EXISTS (SELECT 1 FROM pagos p WHERE p.cita_id = citas.id AND p.anulado = 0)`).run();
+    db.prepare("INSERT INTO meta (clave, valor) VALUES ('arancel_version', ?) ON CONFLICT(clave) DO UPDATE SET valor = excluded.valor")
+      .run(String(ini.version || 1));
+    db.exec("COMMIT");
+    console.log(`Arancel Fonasa actualizado: ${ini.prestaciones.length} prestaciones (versión ${ini.version}). Citas Fonasa sin pagar recalculadas: ${r.changes}.`);
+  }
+} catch (e) {
+  try { db.exec("ROLLBACK"); } catch {}
+  console.error("No se pudo cargar el arancel Fonasa:", e.message);
+}
+
+// Exámenes en MAYÚSCULAS (una vez): aranceles y citas guardadas antes de este cambio
+if (!db.prepare("SELECT 1 FROM meta WHERE clave = 'examenes_mayusculas'").get()) {
+  const M = (v) => String(v ?? "").toLocaleUpperCase("es-CL");
+  try {
+    db.exec("BEGIN");
+    const upA = db.prepare("UPDATE aranceles SET nombre = ? WHERE codigo = ?");
+    for (const a of db.prepare("SELECT codigo, nombre FROM aranceles").all()) if (a.nombre !== M(a.nombre)) upA.run(M(a.nombre), a.codigo);
+    const upC = db.prepare("UPDATE citas SET examen = ?, examenes = ? WHERE id = ?");
+    for (const c of db.prepare("SELECT id, examen, examenes FROM citas").all()) {
+      let exs = c.examenes || "";
+      try { if (exs) exs = JSON.stringify(JSON.parse(exs).map((l) => ({ ...l, nombre: M(l.nombre) }))); } catch {}
+      if (c.examen !== M(c.examen) || exs !== (c.examenes || "")) upC.run(M(c.examen), exs, c.id);
+    }
+    db.prepare("INSERT INTO meta (clave, valor) VALUES ('examenes_mayusculas', '1')").run();
+    db.exec("COMMIT");
+  } catch (e) {
+    try { db.exec("ROLLBACK"); } catch {}
+    console.error("No se pudieron pasar los exámenes a mayúsculas:", e.message);
+  }
+}
+
+// ---------- integración con el PACS ----------
+// accesion: número de acceso del examen (AccessionNumber DICOM), une la cita con las imágenes y el informe.
+// pacs_estado: avance que informa el PACS (imagenes | informado | entregado).
+{
+  const cols = db.prepare("PRAGMA table_info(citas)").all().map((c) => c.name);
+  for (const [col, def] of [["accesion", "TEXT NOT NULL DEFAULT ''"], ["pacs_estado", "TEXT NOT NULL DEFAULT ''"],
+    ["pacs_detalle", "TEXT NOT NULL DEFAULT ''"],
+    // segundo teléfono y segundo correo del paciente (o de un familiar)
+    ["telefono2", "TEXT NOT NULL DEFAULT ''"], ["email2", "TEXT NOT NULL DEFAULT ''"],
+    // médico solicitante elegido de la lista del PACS (0 = escrito a mano, sin acceso al PACS)
+    ["medico_id", "INTEGER NOT NULL DEFAULT 0"]]) {
+    if (!cols.includes(col)) db.exec(`ALTER TABLE citas ADD COLUMN ${col} ${def}`);
+  }
+}
+db.exec(`
+CREATE INDEX IF NOT EXISTS idx_citas_accesion ON citas(accesion);
+-- Clave del paciente para ver sus exámenes en línea (una por paciente, se guarda solo el hash)
+CREATE TABLE IF NOT EXISTS portal_claves (
+  rut TEXT PRIMARY KEY,                 -- RUT sin puntos ni guion, en mayúsculas
+  clave_hash TEXT NOT NULL,
+  usuario_id INTEGER REFERENCES usuarios(id) ON DELETE SET NULL,
+  creado TEXT NOT NULL DEFAULT (datetime('now'))
+);
+-- Cambios pendientes de enviar al PACS (si el PACS no responde, se reintenta)
+CREATE TABLE IF NOT EXISTS pacs_cola (
+  cita_id INTEGER PRIMARY KEY,
+  datos TEXT NOT NULL,
+  intentos INTEGER NOT NULL DEFAULT 0,
+  error TEXT NOT NULL DEFAULT '',
+  version INTEGER NOT NULL DEFAULT 0
+);
+`);
+db.PREFIJO_ACCESION = (process.env.ACCESION_PREFIJO || "AG").toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 6) || "AG";
+db.dataDir = DATA_DIR;
+db.accesionDe = (id) => db.PREFIJO_ACCESION + String(id).padStart(8, "0");
+{
+  const sin = db.prepare("SELECT id FROM citas WHERE accesion = ''").all();
+  const up = db.prepare("UPDATE citas SET accesion = ? WHERE id = ?");
+  for (const r of sin) up.run(db.accesionDe(r.id), r.id);
+}
+
+// v1.1.9: los pagos van en la caja del día agendado. Una sola vez, mueve los pagos ya registrados
+// al día de su cita, salvo que la caja de origen o la de destino ya esté cerrada.
+if (!db.prepare("SELECT 1 FROM meta WHERE clave = 'pagos_dia_cita'").get()) {
+  const r = db.prepare(`UPDATE pagos SET fecha = (SELECT c.fecha FROM citas c WHERE c.id = pagos.cita_id)
+    WHERE cita_id IS NOT NULL
+      AND fecha != (SELECT c.fecha FROM citas c WHERE c.id = pagos.cita_id)
+      AND fecha NOT IN (SELECT fecha FROM cierres)
+      AND (SELECT c.fecha FROM citas c WHERE c.id = pagos.cita_id) NOT IN (SELECT fecha FROM cierres)`).run();
+  db.prepare("INSERT INTO meta (clave, valor) VALUES ('pagos_dia_cita', ?)").run(String(r.changes));
+  if (r.changes) console.log(`Pagos movidos al día de su cita: ${r.changes}.`);
+}
+
+// Claves: scrypt con sal aleatoria (incluido en Node, sin dependencias)
+const crypto = require("crypto");
+db.hashClave = (clave) => {
+  const sal = crypto.randomBytes(16).toString("hex");
+  return "scrypt$" + sal + "$" + crypto.scryptSync(String(clave), sal, 64).toString("hex");
+};
+db.verificarClave = (clave, guardada) => {
+  const [tipo, sal, hash] = String(guardada).split("$");
+  if (tipo !== "scrypt" || !sal || !hash) return false;
+  const a = Buffer.from(hash, "hex"), b = crypto.scryptSync(String(clave), sal, 64);
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+};
+
+module.exports = db;

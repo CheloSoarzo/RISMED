@@ -1,0 +1,89 @@
+# PACS + Informes
+# Servicios:
+#   - postgres : índice de Orthanc (búsquedas rápidas con millones de imágenes)
+#   - orthanc  : PACS. Recibe DICOM de los equipos (puerto 4242), visor OHIF y Stone
+#   - informes : app de informes (dictado, plantillas, firma, PDF, link al paciente)
+#   - caddy    : HTTPS automático (Let's Encrypt) y control de acceso al PACS
+#
+# El puerto web de Orthanc (8042) NO se publica. Nunca agregues "8042:8042" en un servidor en la nube.
+#
+# Uso:  cp .env.example .env  (y editar)  →  docker compose up -d
+
+services:
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: orthanc
+      POSTGRES_PASSWORD: ${PG_PASSWORD}
+      POSTGRES_DB: orthanc
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+
+  orthanc:
+    image: orthancteam/orthanc:latest   # en producción fija una versión concreta
+    restart: unless-stopped
+    depends_on: [postgres]
+    ports:
+      # DICOM por internet: los equipos (CT, RX, US) envían a <IP del servidor>:<DICOM_PUERTO_PUBLICO>.
+      # Solo se aceptan los equipos registrados en Administración → Equipos DICOM, desde la IP de su centro,
+      # y el script firewall/sincronizar_firewall.sh cierra el puerto a cualquier otra IP.
+      - "${DICOM_PUERTO_PUBLICO:-46429}:4242"
+    volumes:
+      - ${DICOM_STORAGE_DIR:-./data/orthanc}:/var/lib/orthanc/db
+    environment:
+      ORTHANC__NAME: ${PACS_NOMBRE:-PACS}
+      ORTHANC__DICOM_AET: ${PACS_AET:-PACS}
+      ORTHANC__DICOM_CHECK_CALLED_AET: "false"
+      # Lista blanca: solo equipos registrados (AE Title + IP del centro) pueden enviar
+      ORTHANC__DICOM_ALWAYS_ALLOW_STORE: "false"
+      ORTHANC__DICOM_ALWAYS_ALLOW_ECHO: "false"
+      ORTHANC__DICOM_CHECK_MODALITY_HOST: "true"
+      ORTHANC__DICOM_MODALITIES_IN_DATABASE: "true"
+      ORTHANC__DICOM_ASSOCIATION_CLOSE_DELAY: "5"
+      ORTHANC__OVERWRITE_INSTANCES: "true"
+      ORTHANC__STABLE_AGE: "60"
+      # El acceso web lo controla la app de informes (un solo login por usuario, vía Caddy).
+      # Orthanc NO publica su puerto web: solo Caddy y la app lo alcanzan por la red interna.
+      ORTHANC__AUTHENTICATION_ENABLED: "false"
+      # Índice en PostgreSQL (las imágenes quedan en disco)
+      ORTHANC__POSTGRESQL__HOST: postgres
+      ORTHANC__POSTGRESQL__DATABASE: orthanc
+      ORTHANC__POSTGRESQL__USERNAME: orthanc
+      ORTHANC__POSTGRESQL__PASSWORD: ${PG_PASSWORD}
+      # Visores
+      DICOM_WEB_PLUGIN_ENABLED: "true"
+      OHIF_PLUGIN_ENABLED: "true"
+      ORTHANC__OHIF__DATA_SOURCE: "dicom-web"
+      STONE_WEB_VIEWER_PLUGIN_ENABLED: "true"
+      # Compresión al vuelo para visores web y mantenimiento
+      GDCM_PLUGIN_ENABLED: "true"
+      HOUSEKEEPER_PLUGIN_ENABLED: "true"
+
+  informes:
+    build: ./informes
+    restart: unless-stopped
+    depends_on: [orthanc]
+    env_file: .env
+    environment:
+      ORTHANC_URL: http://orthanc:8042
+      DATA_DIR: /data
+      PACS_AET: ${PACS_AET:-PACS}
+    volumes:
+      - ./data/informes:/data
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    depends_on: [informes, orthanc]
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      INFORMES_DOMAIN: ${INFORMES_DOMAIN:-}
+      PACS_DOMAIN: ${PACS_DOMAIN:-}
+      DOMINIO: ${DOMINIO:-}
+    volumes:
+      # Caddyfile = dos dominios (informes.* y pacs.*); Caddyfile.unico = todo en un solo dominio
+      - ./${CADDYFILE:-Caddyfile}:/etc/caddy/Caddyfile:ro
+      - ./data/caddy:/data

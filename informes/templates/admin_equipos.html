@@ -1,0 +1,122 @@
+{% extends "base.html" %}
+{% block titulo %}Equipos DICOM{% endblock %}
+{% macro form_equipo(e=None) %}
+{% set k = e.id if e else 'n' %}
+<form method="post">
+  <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+  {% if e %}<input type="hidden" name="id" value="{{ e.id }}">{% endif %}
+  <div class="grid2">
+    <div><label for="e-nombre-{{ k }}">Nombre del equipo</label>
+      <input type="text" id="e-nombre-{{ k }}" name="nombre" value="{{ e.nombre if e }}" placeholder="Ej: TC Rancagua" required></div>
+    <div><label for="e-centro-{{ k }}">Centro</label>
+      <input type="text" id="e-centro-{{ k }}" name="centro" value="{{ e.centro if e }}" placeholder="Ej: Rancagua"></div>
+    <div><label for="e-aet-{{ k }}">AE Title del equipo (el que tiene configurado el equipo)</label>
+      <input type="text" id="e-aet-{{ k }}" name="aet" value="{{ e.aet if e }}" maxlength="16" placeholder="Ej: CT_RANCAGUA" required class="mono"></div>
+    <div><label for="e-ip-{{ k }}">IP pública fija del centro{% if solo_aet %} (opcional){% endif %}</label>
+      <input type="text" id="e-ip-{{ k }}" name="ip" value="{{ e.ip if e }}" placeholder="{{ 'Déjala vacía para aceptar desde cualquier IP' if solo_aet else 'Ej: 200.29.15.195' }}" {{ '' if solo_aet else 'required' }} class="mono" inputmode="decimal"></div>
+  </div>
+  <label for="e-notas-{{ k }}">Notas</label>
+  <input type="text" id="e-notas-{{ k }}" name="notas" value="{{ e.notas if e }}" placeholder="Ej: Siemens Somatom, configurado por el técnico el 26-10">
+  <div class="checks"><label><input type="checkbox" name="activo" {{ 'checked' if not e or e.activo }}> Habilitado para enviar</label></div>
+  <div class="fila">
+    <button class="btn prim" type="submit">{{ 'Guardar' if e else 'Agregar equipo' }}</button>
+  </div>
+</form>
+{% if e %}
+<form method="post" class="mt" onsubmit="return confirm('¿Eliminar {{ e.nombre }}? Dejará de poder enviar estudios.')">
+  <input type="hidden" name="csrf" value="{{ csrf_token() }}"><input type="hidden" name="borrar" value="{{ e.id }}">
+  <button class="btn peligro" type="submit">Eliminar equipo</button>
+</form>
+{% endif %}
+{% endmacro %}
+
+{% block contenido %}
+<div class="cab-pagina">
+  <h1>Equipos que envían por internet</h1>
+  <form method="post"><input type="hidden" name="csrf" value="{{ csrf_token() }}">
+    <button class="btn" name="sincronizar" value="1">Volver a sincronizar con el PACS</button></form>
+</div>
+{% if solo_aet %}
+<div class="panel aviso-info">
+  <b>Modo «solo AE Title»:</b> el PACS acepta a los equipos de esta lista por su AE Title, desde cualquier IP.
+  El AE Title funciona como una clave: usa uno de 8 o más letras y números, distinto para cada equipo
+  (ej: <span class="mono">{{ aet_sugerido }}</span>). Si un equipo tiene IP fija, ponla igual: queda más protegido.
+</div>
+{% else %}
+<p class="suave">Solo los equipos de esta lista pueden enviar estudios al PACS, y solo desde la IP de su centro. Cualquier otro envío se rechaza.</p>
+{% endif %}
+
+<div class="panel config-equipo">
+  <h2>Datos para configurar en cada equipo</h2>
+  <p class="peq suave">En el equipo (CT, rayos, ecógrafo) agrega un destino DICOM de almacenamiento («Storage», «C-STORE», «Nodo DICOM» o «PACS») con estos datos:</p>
+  <div class="datos">
+    <div><span>IP o nombre del servidor</span><b class="mono">{{ ip_servidor or '(IP pública del servidor)' }}</b></div>
+    <div><span>Puerto</span><b class="mono">{{ puerto }}</b></div>
+    <div><span>AE Title del PACS (destino)</span><b class="mono">{{ pacs_aet }}</b></div>
+    <div><span>AE Title del equipo (origen)</span><b>El que registres abajo</b></div>
+  </div>
+</div>
+
+<div class="panel config-equipo">
+  <h2>Horos / OsiriX</h2>
+  <p class="peq">Para buscar y bajar estudios del PACS desde Horos u OsiriX en un Mac:</p>
+  <ol class="peq pasos-horos">
+    <li>Descarga el archivo con los datos del PACS: <a class="btn peq" href="{{ url_for('horos_plist') }}">Descargar nodo DICOM para Horos</a></li>
+    <li>En Horos: <b>Preferencias → Ubicaciones (Locations) → Importar…</b> y elige el archivo. Queda «PACS {{ centro }}» con recuperación <b>C-GET</b>
+        (funciona aunque el Mac esté detrás de un router).</li>
+    <li>En Horos: <b>Preferencias → Escucha (Listener)</b>, anota el <b>AE Title</b> de tu Horos (mejor uno propio y difícil de adivinar, ej. <span class="mono">HOROS_{{ aet_sugerido }}</span>, máximo 16 caracteres).</li>
+    <li>Regístralo aquí abajo como un equipo más (nombre «Horos», ese AE Title{% if solo_aet %}; la IP es opcional{% else %} y la IP pública de donde está el Mac{% endif %}).</li>
+  </ol>
+  <p class="peq suave">Si Horos no tiene «Importar», crea la ubicación a mano con: dirección <span class="mono">{{ ip_servidor or '(IP del servidor)' }}</span>,
+    puerto <span class="mono">{{ puerto }}</span>, AE Title <span class="mono">{{ pacs_aet }}</span>, recuperación C-GET.
+    En cada estudio también está el botón <b>«Abrir en Horos»</b>, que lo baja directo sin configurar nada.</p>
+</div>
+
+{% if estado_pacs %}<div class="flash error">No se pudo consultar el PACS: {{ estado_pacs }}</div>{% endif %}
+
+<div class="tabla-wrap">
+<table class="lista">
+  <thead><tr><th>Equipo</th><th>Centro</th><th>AE Title</th><th>IP del centro</th><th>Estado</th></tr></thead>
+  <tbody>
+  {% for e in equipos %}
+    {% set en = en_pacs.get(prefijo ~ e.id|string) %}
+    <tr>
+      <td><b>{{ e.nombre }}</b>{% if e.notas %}<br><span class="peq suave">{{ e.notas }}</span>{% endif %}</td>
+      <td class="peq">{{ e.centro or '—' }}</td>
+      <td class="mono">{{ e.aet }}</td>
+      <td class="mono">{{ e.ip or 'Cualquier IP' }}{% if solo_aet and aet_debil(e.aet) %} <span class="badge pendiente" title="AE Title fácil de adivinar">AE débil</span>{% endif %}</td>
+      <td>{% if not e.activo %}<span class="badge pendiente">Deshabilitado</span>
+          {% elif en and en.AET == e.aet and en.Host == (e.ip or '0.0.0.0') %}<span class="badge firmado">Habilitado</span>
+          {% else %}<span class="badge borrador">Falta sincronizar</span>{% endif %}</td>
+    </tr>
+  {% else %}
+    <tr><td colspan="5" class="suave vacio-tabla">Aún no hay equipos. Agrega el primero abajo: mientras la lista esté vacía, el PACS no acepta envíos por internet.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+
+{% for e in equipos %}
+  <details class="edit"><summary>Editar · {{ e.nombre }} <span class="suave peq">· {{ e.aet }} · {{ e.ip or 'cualquier IP' }}</span></summary>{{ form_equipo(e) }}</details>
+{% endfor %}
+<details class="edit" {{ 'open' if not equipos }}>
+  <summary>+ Agregar equipo</summary>
+  {{ form_equipo() }}
+</details>
+
+<div class="panel mt-grande">
+  <h2>Firewall del servidor</h2>
+  {% if firewall_token %}
+    {% if solo_aet %}
+    <p class="peq aviso-info">Modo «solo AE Title»: el puerto {{ puerto }} está abierto a cualquier IP. El PACS rechaza a los equipos que no están en esta lista.</p>
+    {% else %}
+    <p class="peq aviso-ok">El script de firewall está configurado: el puerto {{ puerto }} se abre solo a las IPs de esta lista (se actualiza cada 5 minutos).</p>
+    {% endif %}
+  {% else %}
+    <p class="peq aviso-info">Falta activar el firewall automático. En el archivo <span class="mono">.env</span> del servidor agrega
+      <span class="mono">FIREWALL_TOKEN={{ token_sugerido }}</span> y sigue los pasos de «Recibir estudios por internet» en el README.
+      Mientras tanto, el PACS igual rechaza a los equipos que no están en la lista.</p>
+  {% endif %}
+  <p class="peq suave">¿No sabes la IP pública de un centro? Desde un PC de ese centro abre <span class="mono">https://ifconfig.me</span>. Debe ser una IP <b>fija</b>: pídesela a tu proveedor de internet.</p>
+</div>
+{% endblock %}

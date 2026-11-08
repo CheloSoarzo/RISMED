@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block titulo %}Auditoría{% endblock %}
+{% block contenido %}
+<h1>Auditoría</h1>
+<form method="get" class="fila buscar-auditoria">
+  <div class="crece"><label for="q">Buscar por usuario, acción o detalle (RUT, ID de estudio…)</label>
+    <input type="search" id="q" name="q" value="{{ q }}"></div>
+  <button class="btn prim" type="submit">Buscar</button>
+</form>
+<p class="suave">Últimos 500 eventos: ingresos, estudios abiertos, dictados, validaciones, links, correos, entregas y descargas.</p>
+<div class="tabla-wrap">
+<table class="lista">
+  <thead><tr><th>Fecha</th><th>Usuario</th><th>Acción</th><th>Detalle</th><th>IP</th></tr></thead>
+  <tbody>
+  {% for f in filas %}
+    <tr><td class="peq">{{ f.ts|fh }}</td><td>{{ f.usuario }}</td><td>{{ f.accion }}</td>
+      <td class="peq">{{ f.detalle }}</td><td class="peq mono">{{ f.ip }}</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endblock %}

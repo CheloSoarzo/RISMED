@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Ingresar · Agenda de Imágenes</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap">
+<link rel="stylesheet" href="/estilos.css">
+<script>try{var p=localStorage.getItem("agenda-paleta");if(p)document.documentElement.dataset.paleta=p}catch(e){}</script>
+</head>
+<body>
+<div class="login-wrap">
+  <form class="login" id="form" novalidate>
+    <div class="login-logo" id="logo-box" hidden><img id="logo" alt=""></div>
+    <div class="mods" id="mods"><span class="mx">MAMOGRAFÍA</span></div>
+    <h1>Agenda de Mamografía</h1>
+    <p class="sub">Ingresa con tu usuario del centro.</p>
+    <div class="field"><label for="usuario">Usuario</label><input id="usuario" autocomplete="username" autocapitalize="none" required></div>
+    <div class="field"><label for="clave">Clave</label><input id="clave" type="password" autocomplete="current-password" required></div>
+    <div class="msg err" id="msg"></div>
+    <button class="btn primary" type="submit" id="entrar">Ingresar</button>
+  </form>
+</div>
+<script>
+const f=document.getElementById("form"),msg=document.getElementById("msg");
+f.addEventListener("submit",async e=>{
+  e.preventDefault();msg.textContent="";
+  const btn=document.getElementById("entrar");btn.disabled=true;
+  try{
+    const r=await fetch("/api/login",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({usuario:f.usuario.value.trim(),clave:f.clave.value})});
+    const j=await r.json().catch(()=>({}));
+    if(r.ok){location.href="/";return}
+    msg.textContent=j.error||"No se pudo ingresar.";
+  }catch(err){msg.textContent="No hay conexión con el servidor."}
+  btn.disabled=false;
+});
+document.getElementById("usuario").focus();
+fetch("/api/config").then(r=>r.json()).then(c=>{
+  if(c.centro){document.querySelector(".login h1").textContent="Agenda "+c.centro;document.title="Ingresar · Agenda "+c.centro}
+  if(c.logo){const img=document.getElementById("logo");img.alt=c.centro?"Logo "+c.centro:"Logo del centro";
+    img.onload=()=>{document.getElementById("logo-box").hidden=false;document.getElementById("mods").hidden=true};img.src=c.logo}
+}).catch(()=>{});
+</script>
+<footer class="pie-sistema" id="pie-sistema"></footer>
+<script>fetch("/api/config").then(r=>r.json()).then(c=>{document.getElementById("pie-sistema").textContent=location.host+" · Versión "+(c.version||"")+" · © 2026 MSC26"}).catch(()=>{})</script>
+</body>
+</html>

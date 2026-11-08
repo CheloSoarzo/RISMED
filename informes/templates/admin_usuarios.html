@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+{% block titulo %}Usuarios{% endblock %}
+{% macro form_usuario(u=None) %}
+<form method="post" enctype="multipart/form-data">
+  <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+  {% if u %}<input type="hidden" name="id" value="{{ u.id }}">{% endif %}
+  <div class="grid2">
+    {% if not u %}<div><label for="u-usuario-n">Usuario (para ingresar)</label><input type="text" id="u-usuario-n" name="usuario" required pattern="[a-zA-Z0-9._\-]{3,40}" autocomplete="off"></div>{% endif %}
+    <div><label for="u-nombre-{{ u.id if u else 'n' }}">Nombre completo (aparece en el informe)</label>
+      <input type="text" id="u-nombre-{{ u.id if u else 'n' }}" name="nombre" value="{{ u.nombre if u }}" required></div>
+    <div><label for="u-perfil-{{ u.id if u else 'n' }}">Perfil</label>
+      <select id="u-perfil-{{ u.id if u else 'n' }}" name="perfil_id" required>
+        {% for p in perfiles %}<option value="{{ p.id }}" {{ 'selected' if (u and u.perfil_id == p.id) or (not u and p.clave == 'radiologos') }}>{{ p.nombre }}</option>{% endfor %}
+      </select></div>
+    <div><label for="u-titulo-{{ u.id if u else 'n' }}">Título</label>
+      <input type="text" id="u-titulo-{{ u.id if u else 'n' }}" name="titulo" value="{{ u.titulo if u }}" placeholder="Médico Radiólogo"></div>
+    <div><label for="u-reg-{{ u.id if u else 'n' }}">RUT / Registro profesional</label>
+      <input type="text" id="u-reg-{{ u.id if u else 'n' }}" name="registro" value="{{ u.registro if u }}" placeholder="RUT 12.345.678-9 · Reg. SIS 123456"></div>
+    <div><label for="u-clave-{{ u.id if u else 'n' }}">{{ 'Nueva clave (dejar vacío para no cambiar)' if u else 'Clave (mínimo 10 caracteres)' }}</label>
+      <input type="password" id="u-clave-{{ u.id if u else 'n' }}" name="clave" autocomplete="new-password" minlength="10" {{ '' if u else 'required' }}></div>
+    <div><label for="u-centros-{{ u.id if u else 'n' }}">Centros que puede ver (separados por coma; vacío = todos)</label>
+      <input type="text" id="u-centros-{{ u.id if u else 'n' }}" name="centros" value="{{ u.centros if u }}" list="centros-conocidos" placeholder="Todos los centros"></div>
+    <div><label for="u-sol-{{ u.id if u else 'n' }}">Médico solicitante (opcional): su nombre como aparece en los exámenes, para que vea solos los que solicitó</label>
+      <input type="text" id="u-sol-{{ u.id if u else 'n' }}" name="filtro_solicitante" value="{{ u.filtro_solicitante if u }}" list="solicitantes-conocidos" placeholder="Ej: CAROLINA ROJAS"></div>
+    <div><label for="u-firma-{{ u.id if u else 'n' }}">Imagen de firma (radiólogos; PNG con fondo transparente)</label>
+      <input type="file" id="u-firma-{{ u.id if u else 'n' }}" name="firma" accept=".png,.jpg,.jpeg">
+      {% if u and u.firma_png %}<span class="peq suave">Firma cargada ✓</span>{% endif %}</div>
+  </div>
+  <div class="checks"><label><input type="checkbox" name="activo" {{ 'checked' if not u or u.activo }}> Activo</label></div>
+  <button class="btn prim" type="submit">{{ 'Guardar cambios' if u else 'Crear usuario' }}</button>
+</form>
+{% endmacro %}
+{% block contenido %}
+<div class="cab-pagina">
+  <h1>Usuarios</h1>
+  <a class="btn" href="{{ url_for('admin_perfiles') }}">Perfiles y permisos →</a>
+</div>
+<p class="suave">Lo que puede hacer cada usuario depende de su perfil. Además, cualquier usuario se puede limitar a ciertos centros.</p>
+<datalist id="centros-conocidos">{% for c in centros_conocidos %}<option value="{{ c }}">{% endfor %}</datalist>
+<datalist id="solicitantes-conocidos">{% for c in solicitantes_conocidos %}<option value="{{ c }}">{% endfor %}</datalist>
+{% for u in usuarios %}
+  <details class="edit">
+    <summary>{{ u.nombre }} <span class="suave peq">· {{ u.usuario }} · {{ u.perfil_nombre or 'sin perfil' }}{% if u.centros %} · {{ u.centros }}{% endif %}{% if not u.activo %} · inactivo{% endif %}</span></summary>
+    {{ form_usuario(u) }}
+    {% if u.id != usuario.id %}
+    <form method="post" action="{{ url_for('eliminar_usuario', uid=u.id) }}" class="mt"
+          onsubmit="return confirm('¿Eliminar a {{ u.nombre|e }}? Ya no podrá entrar. Sus informes firmados y su historial se conservan.')">
+      <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+      <button class="btn peligro" type="submit">Eliminar usuario</button>
+      <span class="suave peq">Si solo quieres bloquearlo por un tiempo, desmarca «Activo».</span>
+    </form>
+    {% endif %}
+  </details>
+{% endfor %}
+<details class="edit" open>
+  <summary>+ Nuevo usuario</summary>
+  {{ form_usuario() }}
+</details>
+{% endblock %}
