@@ -28,7 +28,10 @@ services:
       - ${INSTANCIA_DIR}/data/orthanc:/var/lib/orthanc/db
       # Lista de trabajo (worklist) que arma la app a partir de la agenda
       - ${INSTANCIA_DIR}/data/worklists:/worklists:ro
+      # Repara al recibirlas las imágenes que los visores web no pueden leer (etiquetas privadas, ej. CR Fuji)
+      - ./orthanc/reparar-dicomweb.lua:/etc/orthanc/reparar-dicomweb.lua:ro
     environment:
+      ORTHANC__LUA_SCRIPTS: '["/etc/orthanc/reparar-dicomweb.lua"]'
       ORTHANC__NAME: ${PACS_NOMBRE:-PACS}
       ORTHANC__DICOM_AET: ${PACS_AET:-PACS}
       ORTHANC__DICOM_CHECK_CALLED_AET: "false"
@@ -46,8 +49,8 @@ services:
       ORTHANC__POSTGRESQL__USERNAME: orthanc
       ORTHANC__POSTGRESQL__PASSWORD: ${PG_PASSWORD}
       DICOM_WEB_PLUGIN_ENABLED: "true"
-      # Sin caché de metadatos DICOMweb: con algunos estudios (ej. CR reenviados) la caché queda inválida y el visor
-      # OHIF falla con "The series metadata json does not contain an array". Sin caché se leen directo (un poco más lento).
+      # Sin caché de metadatos DICOMweb: si una imagen no se puede convertir, la caché queda vacía y el visor sigue
+      # fallando aunque después se repare (ver orthanc/reparar-dicomweb.lua). Sin caché se lee directo.
       ORTHANC__DICOM_WEB__ENABLE_METADATA_CACHE: "false"
       OHIF_PLUGIN_ENABLED: "true"
       ORTHANC__OHIF__DATA_SOURCE: "dicom-web"

@@ -20,6 +20,7 @@
 #   pacs cuota <nombre> <GB>   espacio contratado de un PACS (se muestra en el panel; 0 = sin límite)
 #   pacs estado                actualiza los números del panel (lo hace cron cada 5 min)
 #   pacs dicom-modo <nombre> aetitle|ip   cómo acepta equipos: solo por AE Title (cualquier IP) o por AE Title + IP
+#   pacs reparar-visor <nombre>   repara los estudios que los visores web no pueden abrir (etiquetas privadas, ej. CR Fuji)
 #   pacs dictado-ia activar [small|medium]   transcripción automática de los dictados con IA (Whisper),
 #                              en este mismo servidor y para todos sus PACS (el audio no sale del servidor)
 #   pacs dictado-ia desactivar | estado
@@ -651,6 +652,33 @@ cmd_respaldo() {
   echo "Respaldos en $RESPALDOS"
 }
 
+cmd_reparar_visor() {  # estudios ya recibidos que los visores web no pueden abrir (etiquetas privadas)
+  local n="${1:-}"; existe "$n"
+  echo "Revisando las imágenes de $n (puede tardar unos minutos)..."
+  docker exec -i "pacs-$n-informes-1" python - <<'PY'
+import os, requests
+O = os.environ["ORTHANC_URL"]
+s = requests.Session()
+revisadas = reparadas = fallidas = 0
+for iid in s.get(f"{O}/instances", timeout=120).json():
+    t = s.get(f"{O}/instances/{iid}/tags?simplify", timeout=120).json()
+    st, se, sop = t.get("StudyInstanceUID"), t.get("SeriesInstanceUID"), t.get("SOPInstanceUID")
+    revisadas += 1
+    if not (st and se and sop):
+        continue
+    if s.get(f"{O}/dicom-web/studies/{st}/series/{se}/instances/{sop}/metadata", timeout=300).ok:
+        continue
+    r = s.post(f"{O}/instances/{iid}/modify", json={"RemovePrivateTags": True, "Force": True,
+               "Keep": ["StudyInstanceUID", "SeriesInstanceUID", "SOPInstanceUID"]}, timeout=600)
+    if r.ok and s.post(f"{O}/instances", data=r.content, timeout=600).ok:
+        reparadas += 1
+    else:
+        fallidas += 1
+        print("  no se pudo reparar", sop)
+print(f"Imágenes revisadas: {revisadas} · reparadas: {reparadas} · con error: {fallidas}")
+PY
+}
+
 c="${1:-}"; shift || true
 case "$c" in
   base) cmd_base;;
@@ -673,6 +701,7 @@ case "$c" in
   cuota) cmd_cuota "$@";;
   estado) cmd_estado;;
   dicom-modo) cmd_dicom_modo "$@";;
+  reparar-visor) cmd_reparar_visor "$@";;
   dictado-ia) cmd_dictado_ia "$@";;
-  *) sed -n '2,25p' "$0"; exit 1;;
+  *) sed -n '2,26p' "$0"; exit 1;;
 esac
