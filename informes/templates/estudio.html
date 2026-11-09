@@ -24,6 +24,7 @@
     <a class="btn prim" href="{{ visor_ohif }}" target="_blank" rel="noopener">Abrir en visor OHIF ↗</a>
     <a class="btn" href="{{ visor_stone }}" target="_blank" rel="noopener">Visor Stone ↗</a>
     {% endif %}
+    <a class="btn" href="#visor-caja" data-vista-rapida title="Ver las imágenes en la vista rápida{{ ' (ahí se pueden borrar imágenes)' if puede('borrar_examen') }}">Vista rápida</a>
     {% if puede('descargar') %}<a class="btn" href="{{ url_for('estudio_zip', estudio_id=est.id) }}">Descargar DICOM</a>
     <span class="btn-grupo" title="Descarga el estudio directo en Horos u OsiriX (Mac)">
       <button type="button" class="btn" data-horos="horos">Abrir en Horos</button><button type="button" class="btn" data-horos="osirix">OsiriX</button>
@@ -65,7 +66,7 @@
         {% for c in cands %}
         <label class="cand"><input type="radio" name="accesion" value="{{ c.accesion }}" required {{ 'checked' if loop.first and c.mismo_rut and (cands|selectattr('mismo_rut')|list|length) == 1 }}>
           <span><b>{{ c.paciente }}</b> · {{ c.rut }} · {{ c.examen or c.equipo|upper }}
-          <span class="suave peq">{{ c.fecha }} {{ c.hora }} · {{ c.accesion }}{% if c.mismo_rut %} · mismo RUT{% endif %}</span></span></label>
+          <span class="suave peq">{{ c.fecha }} {{ c.hora }} · {{ c.accesion }}{% if c.mismo_rut %} · mismo RUT{% endif %}{% if c.n_estudios %} · ya tiene {{ c.n_estudios }} estudio{{ 's' if c.n_estudios > 1 }}: este se suma a la misma cita{% endif %}</span></span></label>
         {% endfor %}
         <button class="btn" type="submit" style="margin-top:6px">Unir con la cita elegida</button>
       </form>
@@ -535,7 +536,8 @@
 <script src="{{ url_for('static', filename='visor.js') }}"></script>
 <script src="{{ url_for('static', filename='audio.js') }}"></script>
 <script>
-  iniciarVisores({{ url_for('series_json', estudio_id=est.id)|tojson }});
+  iniciarVisores({{ url_for('series_json', estudio_id=est.id)|tojson }}{% if puede('borrar_examen') %},
+    { url: {{ url_for('borrar_imagenes', estudio_id=est.id)|tojson }}, csrf: {{ csrf_token()|tojson }}, validado: {{ (inf is not none and inf.estado == 'firmado')|tojson }} }{% endif %});
   window.EDITOR = {
     csrf: {{ csrf_token()|tojson }},
     editable: {{ puede_editar|tojson }},

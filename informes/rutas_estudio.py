@@ -1,6 +1,7 @@
 """Pantalla de estudio: informe, flujo dictado → transcripción → validación, asignación, notas y entregas."""
 import mimetypes
 import os
+import re
 from datetime import datetime
 
 from flask import abort, flash, jsonify, redirect, render_template, request, send_file, url_for
@@ -273,6 +274,41 @@ def corregir_validado(estudio_id):
     return _volver(estudio_id, "informe")
 
 
+@app.route("/estudio/<estudio_id>/imagenes/borrar", methods=["POST"])
+@login_requerido("borrar_examen")
+def borrar_imagenes(estudio_id):
+    """Borra una imagen o una serie del estudio (ej. una imagen repetida, de otro paciente o mal tomada).
+    No se puede borrar la última imagen: para eso está «Borrar examen». Queda en la auditoría con el motivo."""
+    estudio_visible(estudio_id)
+    d = request.get_json(silent=True) or {}
+    nivel = {"imagen": "instances", "serie": "series"}.get(d.get("tipo"))
+    objeto = str(d.get("id") or "")
+    motivo = str(d.get("motivo") or "").strip()[:300]
+    if not nivel or not re.fullmatch(r"[A-Za-z0-9._-]{1,80}", objeto):
+        return jsonify(error="Imagen no válida."), 400
+    if not motivo:
+        return jsonify(error="Indica por qué se borra."), 400
+    inf = informe_por_estudio(estudio_id)
+    if inf and inf["estado"] == "firmado" and not d.get("validado_ok"):
+        return jsonify(error="Este examen tiene un informe validado: confirma que igual quieres borrar.",
+                       pide_confirmar=True), 409
+    try:
+        if pacs.estudio_de(nivel, objeto) != estudio_id:
+            return jsonify(error="Esa imagen no es de este examen."), 404
+        series = [s for s in pacs.series(estudio_id)]
+        total = sum(len(pacs.instancias_ordenadas(s["id"])) for s in series)
+        borrar = 1 if nivel == "instances" else len(pacs.instancias_ordenadas(objeto))
+        if borrar >= total:
+            return jsonify(error="Es la última imagen del examen. Para eliminarlo completo usa «Borrar examen»."), 409
+        (pacs.borrar_instancia if nivel == "instances" else pacs.borrar_serie)(objeto)
+    except OrthancError as e:
+        return jsonify(error=f"No se pudo borrar del PACS: {e}"), 502
+    que = "imagen" if nivel == "instances" else f"serie ({borrar} imágenes)"
+    registrar("borrar_imagen", f"{estudio_id} · {que} {objeto}{' · informe validado' if inf and inf['estado'] == 'firmado' else ''}"
+                               f" · motivo: {motivo}")
+    return jsonify(ok=True, borradas=borrar, quedan=total - borrar)
+
+
 @app.route("/estudio/<estudio_id>/borrar", methods=["POST"])
 @login_requerido("borrar_examen")
 def borrar_examen(estudio_id):
@@ -325,8 +361,9 @@ def borrar_examen(estudio_id):
         db.execute("DELETE FROM informes WHERE id=?", (inf["id"],))
     for tabla in ("dictados", "notas", "entregas", "estudio_meta"):
         db.execute(f"DELETE FROM {tabla} WHERE estudio_id=?", (estudio_id,))
-    cita = db.execute("SELECT accesion FROM ordenes WHERE estudio_id=?", (estudio_id,)).fetchone()
-    db.execute("UPDATE ordenes SET estudio_id='', borrado_en=? WHERE estudio_id=?", (ahora(), estudio_id))
+    from integracion import estudios_de_orden, separar_estudio
+    acc_cita = separar_estudio(db, estudio_id)
+    quedan = bool(acc_cita and estudios_de_orden(db, acc_cita))   # la cita tiene otros estudios (varios exámenes)
     db.commit()
     for carpeta, nombre in archivos:
         try:
@@ -338,9 +375,10 @@ def borrar_examen(estudio_id):
                f"{est['descripcion']} · acceso {est['accession'] or '-'}")
     estado_inf = ("sin informe" if not inf else
                   f"informe VALIDADO v{inf['version']} por {firmante or '?'}" if validado else f"informe {inf['estado']}")
-    registrar("borrar_examen", f"{resumen} · {estado_inf}{' · cita ' + cita[0] if cita else ''} · motivo: {motivo[:300]}")
+    registrar("borrar_examen", f"{resumen} · {estado_inf}{' · cita ' + acc_cita if acc_cita else ''} · motivo: {motivo[:300]}")
     flash(f"Examen borrado: {est['paciente_nombre']} · {est['fecha']} · {est['modalidad']} {est['descripcion']}."
-          + (" La cita de la agenda vuelve a quedar sin imágenes." if cita else ""), "ok")
+          + ((" Su cita de la agenda conserva los demás estudios." if quedan else
+             " La cita de la agenda vuelve a quedar sin imágenes.") if acc_cita else ""), "ok")
     return redirect(lista_url)
 
 
