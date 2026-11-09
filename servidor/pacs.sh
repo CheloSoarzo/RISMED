@@ -350,8 +350,12 @@ poner() {  # poner <archivo> <VAR> <valor>
 
 cmd_dominio() {
   local n="${1:-}" d="${2:-}"; existe "$n"; [ -n "$d" ] || error "uso: pacs dominio <nombre> <dominio>"
-  local e="$INST/$n/.env"
+  local e="$INST/$n/.env" viejo
+  viejo="$(leer "$e" DOMINIO)"
   poner "$e" DOMINIO "$d"; poner "$e" PUBLIC_BASE_URL "https://$d"; poner "$e" PACS_PUBLIC_URL "https://$d"
+  # El portal de pacientes (hoja de retiro de la agenda) se cambia con el dominio, salvo que use un portal común
+  local p; p="$(leer "$e" PORTAL_URL)"
+  if [ -z "$p" ] || [ "$p" = "https://$viejo/paciente" ]; then poner "$e" PORTAL_URL "https://$d/paciente"; fi
   dc "$n" up -d
   recargar_caddy
   echo "PACS $n ahora en https://$d (el dominio debe apuntar a $(ip_publica))"
@@ -552,6 +556,11 @@ cmd_post_actualizar() {
     # Variables de la integración con la agenda (PACS creados antes de esta versión)
     [ -n "$(leer "$INST/$n/.env" INTEGRACION_TOKEN)" ] || poner "$INST/$n/.env" INTEGRACION_TOKEN "$(openssl rand -hex 24)"
     grep -qE "^PORTAL_URL=" "$INST/$n/.env" || poner "$INST/$n/.env" PORTAL_URL "https://$(leer "$INST/$n/.env" DOMINIO)/paciente"
+    # Portal que quedó con la dirección provisoria (.sslip.io) después de poner el dominio propio
+    case "$(leer "$INST/$n/.env" PORTAL_URL)" in
+      *.sslip.io/paciente) case "$(leer "$INST/$n/.env" DOMINIO)" in *.sslip.io) ;;
+        *) poner "$INST/$n/.env" PORTAL_URL "https://$(leer "$INST/$n/.env" DOMINIO)/paciente";; esac;;
+    esac
     mkdir -p "$INST/$n/data/worklists"
     escribir_version "$n"
     [ "$(leer "$INST/$n/.env" ACTIVO)" = "false" ] && continue

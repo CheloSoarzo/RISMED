@@ -46,6 +46,9 @@ services:
       ORTHANC__POSTGRESQL__USERNAME: orthanc
       ORTHANC__POSTGRESQL__PASSWORD: ${PG_PASSWORD}
       DICOM_WEB_PLUGIN_ENABLED: "true"
+      # Sin caché de metadatos DICOMweb: con algunos estudios (ej. CR reenviados) la caché queda inválida y el visor
+      # OHIF falla con "The series metadata json does not contain an array". Sin caché se leen directo (un poco más lento).
+      ORTHANC__DICOM_WEB__ENABLE_METADATA_CACHE: "false"
       OHIF_PLUGIN_ENABLED: "true"
       ORTHANC__OHIF__DATA_SOURCE: "dicom-web"
       STONE_WEB_VIEWER_PLUGIN_ENABLED: "true"
