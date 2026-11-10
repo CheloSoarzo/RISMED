@@ -247,7 +247,25 @@ def datos_pdf(inf):
     d["firmado_en_txt"] = fmt_fecha_hora(inf["firmado_en"])
     t = usuario_por_id(inf["transcrito_por"]) if inf["transcrito_por"] else None
     d["transcriptor_iniciales"] = iniciales(t["nombre"]) if t else ""
+    if not (d.get("descripcion") or "").strip():
+        d["descripcion"] = examen_de_agenda(inf["estudio_id"])
     return d
+
+
+def examen_de_agenda(estudio_id):
+    """Nombre del examen de la cita de la agenda unida al estudio (ej. «Mamografía bilateral»), para usarlo
+    como título del informe cuando el equipo no envía la descripción del estudio. Vacío si no hay cita."""
+    if not estudio_id:
+        return ""
+    try:
+        r = get_db().execute(
+            """SELECT o.examen FROM ordenes o
+               WHERE o.eliminada=0 AND (o.estudio_id=? OR o.accesion IN
+                     (SELECT accesion FROM orden_estudios WHERE estudio_id=?))
+               ORDER BY o.actualizado DESC LIMIT 1""", (estudio_id, estudio_id)).fetchone()
+    except Exception:
+        return ""   # base sin la integración con la agenda
+    return (r["examen"] or "").strip() if r else ""
 
 
 def firmante_de(inf):

@@ -111,7 +111,8 @@ def generar_pdf(informe, firmante, centro, url_verificacion=None, logo_path=None
     el.append(t)
     el.append(Spacer(1, 5 * mm))
 
-    titulo = informe.get("descripcion") or "Informe imagenológico"
+    # Título: el tipo de examen (descripción del estudio o, si el equipo no la envía, el examen de la cita)
+    titulo = (informe.get("descripcion") or "").strip() or "Mamografía"   # RISMED: solo mamografía
     el.append(Paragraph(escape(titulo.upper()), ESTILOS["titulo"]))
     el.extend(_cuerpo(informe.get("cuerpo", "")))
     el.append(Spacer(1, 8 * mm))
