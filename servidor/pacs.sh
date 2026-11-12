@@ -20,7 +20,7 @@
 #   pacs cuota <nombre> <GB>   espacio contratado de un PACS (se muestra en el panel; 0 = sin límite)
 #   pacs estado                actualiza los números del panel (lo hace cron cada 5 min)
 #   pacs dicom-modo <nombre> aetitle|ip   cómo acepta equipos: solo por AE Title (cualquier IP) o por AE Title + IP
-#   pacs reparar-visor <nombre>   repara los estudios que el visor web no abre y comprime sin pérdida los ya recibidos
+#   pacs reparar-visor <nombre>   repara los estudios que el visor web no abre y descomprime los guardados comprimidos
 #   pacs dictado-ia activar [small|medium]   transcripción automática de los dictados con IA (Whisper),
 #                              en este mismo servidor y para todos sus PACS (el audio no sale del servidor)
 #   pacs dictado-ia desactivar | estado
@@ -652,7 +652,7 @@ cmd_respaldo() {
   echo "Respaldos en $RESPALDOS"
 }
 
-cmd_reparar_visor() {  # estudios ya recibidos: repara los que el visor web no abre y comprime sin pérdida los que no lo están
+cmd_reparar_visor() {  # estudios ya recibidos: repara los que el visor web no abre y descomprime los que quedaron en JPEG-LS
   local n="${1:-}"; existe "$n"
   echo "Revisando las imágenes de $n (puede tardar unos minutos)..."
   docker exec -i "pacs-$n-informes-1" python - <<'PY'
@@ -660,7 +660,7 @@ import os, requests
 O = os.environ["ORTHANC_URL"]
 s = requests.Session()
 JPEG_LS = "1.2.840.10008.1.2.4.80"
-SIN_COMPRIMIR = {"1.2.840.10008.1.2", "1.2.840.10008.1.2.1", "1.2.840.10008.1.2.2"}
+SIN_COMPRESION = "1.2.840.10008.1.2.1"   # Explicit VR Little Endian
 revisadas = reparadas = fallidas = 0
 for iid in s.get(f"{O}/instances", timeout=120).json():
     t = s.get(f"{O}/instances/{iid}/tags?simplify", timeout=120).json()
@@ -670,8 +670,8 @@ for iid in s.get(f"{O}/instances", timeout=120).json():
         continue
     cmd = {"Force": True, "Keep": ["StudyInstanceUID", "SeriesInstanceUID", "SOPInstanceUID"]}
     ts = s.get(f"{O}/instances/{iid}/metadata/TransferSyntax", timeout=60).text.strip()
-    if ts in SIN_COMPRIMIR:
-        cmd["Transcode"] = JPEG_LS          # comprimida sin pérdida: ~7 veces más liviana
+    if ts == JPEG_LS:
+        cmd["Transcode"] = SIN_COMPRESION   # vuelve al formato original, sin comprimir
     if not s.get(f"{O}/dicom-web/studies/{st}/series/{se}/instances/{sop}/metadata", timeout=300).ok:
         cmd["RemovePrivateTags"] = True     # etiquetas privadas que el visor web no puede leer
     if len(cmd) == 2:
@@ -682,7 +682,7 @@ for iid in s.get(f"{O}/instances", timeout=120).json():
     else:
         fallidas += 1
         print("  no se pudo reparar", sop)
-print(f"Imágenes revisadas: {revisadas} · reparadas o comprimidas: {reparadas} · con error: {fallidas}")
+print(f"Imágenes revisadas: {revisadas} · reparadas o descomprimidas: {reparadas} · con error: {fallidas}")
 PY
 }
 

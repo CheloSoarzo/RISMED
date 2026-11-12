@@ -32,9 +32,7 @@ services:
       - ./orthanc/reparar-dicomweb.lua:/etc/orthanc/reparar-dicomweb.lua:ro
     environment:
       ORTHANC__LUA_SCRIPTS: '["/etc/orthanc/reparar-dicomweb.lua"]'
-      # Guarda las imágenes comprimidas SIN pérdida (JPEG-LS): una mamografía de CR pasa de ~56 MB a ~7 MB.
-      # La imagen es idéntica; el visor carga ~7 veces más rápido y el disco dura ~7 veces más.
-      ORTHANC__INGEST_TRANSCODING: "1.2.840.10008.1.2.4.80"
+      # Sin compresión: las imágenes se guardan tal como las envía el equipo (pedido del centro, 12/11/2026).
       ORTHANC__NAME: ${PACS_NOMBRE:-PACS}
       ORTHANC__DICOM_AET: ${PACS_AET:-PACS}
       ORTHANC__DICOM_CHECK_CALLED_AET: "false"
