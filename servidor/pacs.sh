@@ -572,6 +572,15 @@ cmd_post_actualizar() {
   recargar_caddy
   proxy up -d
   instalar_cron
+  # 1.1.5: una sola vez, deja sin comprimir las imágenes guardadas en JPEG-LS (en segundo plano: puede tardar)
+  for n in $(instancias); do
+    local marca="$INST/$n/data/.sin-compresion-1.1.5"
+    [ -f "$marca" ] && continue
+    [ "$(leer "$INST/$n/.env" ACTIVO)" = "false" ] && continue
+    touch "$marca"
+    ( sleep 30; bash "$CODIGO/servidor/pacs.sh" reparar-visor "$n" ) >> "/var/log/pacs-reparar-$n.log" 2>&1 &
+    echo "PACS $n: descomprimiendo imágenes en segundo plano (registro en /var/log/pacs-reparar-$n.log)"
+  done
   echo "Todos los PACS actualizados a la versión $(version)"
 }
 
