@@ -5,6 +5,7 @@ from flask import Response, abort, flash, jsonify, redirect, render_template, re
 
 from core import (app, centro_info, datos_pdf, estudio_visible, firmante_de, login_requerido, nombre_archivo,
                   nuevo_link, pacs, pdf_de, registrar, url_link, usuario_actual, ve_informe)
+from config import Config
 from db import ahora, auditar, get_db
 from permisos import restringido
 
@@ -54,6 +55,12 @@ def revocar_link(inf_id):
 
 
 # ------------------------------------------------------------------ página del paciente
+def visor_ohif_de(estudio_id):
+    """Link al visor diagnóstico (OHIF) del estudio, para el paciente y su médico tratante ('' si no está)."""
+    est = pacs.estudio(estudio_id) if estudio_id else None
+    return f"{Config.PACS_PUBLIC_URL}/ohif/viewer?StudyInstanceUIDs={est['uid']}" if est and est.get("uid") else ""
+
+
 def _link_publico(token):
     link = get_db().execute("SELECT * FROM links WHERE token=?", (token,)).fetchone()
     if not link or link["revocado"] or link["expira"] < ahora():
@@ -79,11 +86,13 @@ def publico(token):
             auditar("paciente", "clave_link_fallida", f"link {link['id']}", request.remote_addr or "")
             flash("Clave incorrecta.", "error")
         return render_template("publico_clave.html", token=token)
+    session[f"lk_{link['id']}"] = True      # también sin clave: así el visor diagnóstico le muestra este examen
     db = get_db()
     db.execute("UPDATE links SET accesos=accesos+1, ultimo_acceso=? WHERE id=?", (ahora(), link["id"]))
     db.commit()
     auditar("paciente", "abrir_link", f"link {link['id']} informe {inf['id']}", request.remote_addr or "")
     return render_template("publico.html", token=token, inf=inf, d=datos_pdf(inf), firmante=firmante_de(inf),
+                           visor_ohif=visor_ohif_de(inf["estudio_id"]),
                            centro_info=centro_info())
 
 
@@ -101,10 +110,7 @@ def publico_series(token):
     link, inf = _link_publico(token)
     if not link or not _clave_ok(link):
         abort(404)
-    series = pacs.series(inf["estudio_id"])
-    for s in series:
-        s["instancias"] = pacs.instancias_ordenadas(s["id"])
-    return jsonify(series=[s for s in series if s["instancias"] and s["modalidad"] not in ("SR", "PR", "KO")])
+    return jsonify(series=pacs.series_visor(inf["estudio_id"]))
 
 
 @app.route("/r/<token>/img/<instancia_id>")
@@ -125,8 +131,19 @@ def publico_zip(token):
 
 
 # ------------------------------------------------------------------ imágenes (uso interno)
+def ventana_pedida():
+    """Centro y ancho de ventana pedidos por el visor (?wc=&ww=), validados; (None, None) si no vienen."""
+    try:
+        c, a = float(request.args["wc"]), float(request.args["ww"])
+    except (KeyError, ValueError):
+        return None, None
+    if not (-1e6 < c < 1e6 and 0.5 <= a < 2e6):
+        return None, None
+    return round(c, 1), round(a, 1)
+
+
 def _imagen(instancia_id):
-    r = pacs.preview(instancia_id)
+    r = pacs.preview(instancia_id, *ventana_pedida())
     if r is None:
         abort(404)
     return Response(r.content, mimetype=r.headers.get("Content-Type", "image/png"),
@@ -157,10 +174,7 @@ def img(instancia_id):
 @login_requerido()
 def series_json(estudio_id):
     estudio_visible(estudio_id)
-    series = pacs.series(estudio_id)
-    for s in series:
-        s["instancias"] = pacs.instancias_ordenadas(s["id"])
-    return jsonify(series=[s for s in series if s["instancias"]])
+    return jsonify(series=pacs.series_visor(estudio_id))
 
 
 @app.route("/estudio/<estudio_id>/zip")

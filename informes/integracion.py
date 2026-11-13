@@ -21,6 +21,8 @@ import json
 import os
 import re
 import secrets
+import sqlite3
+import threading
 import uuid
 from datetime import date, datetime, timedelta
 
@@ -391,6 +393,64 @@ def unir_estudios():
     except Exception as e:  # noqa: BLE001  (si el PACS no responde, se reintenta en la próxima consulta)
         app.logger.warning("No se pudieron unir estudios con la agenda: %s", e)
     db.commit()
+    # 3) Fecha de nacimiento: si el equipo no la trajo (el tecnólogo escribió los datos sin el worklist),
+    #    se completa en las imágenes con la de la agenda
+    pendientes = {r["estudio_id"]: _fecha(r["fecha_nac"]) for r in db.execute(
+        """SELECT oe.estudio_id, o.fecha_nac FROM ordenes o JOIN orden_estudios oe ON oe.accesion=o.accesion
+           WHERE o.eliminada=0 AND o.fecha>=? AND o.fecha_nac!=''""", (hace,)).fetchall()
+        if re.fullmatch(r"(19|20)\d{6}", _fecha(r["fecha_nac"])) and r["estudio_id"] not in _fnac_listos}
+    if pendientes:
+        completar_fnac_en_segundo_plano(pendientes)
+
+
+# ---------- fecha de nacimiento desde la agenda ----------
+_fnac_listos = set()          # estudios ya revisados (con fecha) en este proceso
+_fnac_candado = threading.Lock()
+
+
+def completar_fnac_en_segundo_plano(pendientes):
+    """Pone en el PACS la fecha de nacimiento de la agenda a los estudios que llegaron sin ella.
+    Corre aparte (modificar un estudio grande toma tiempo) y solo cuando el estudio terminó de llegar."""
+    if _fnac_candado.locked():
+        return                # ya hay una pasada en curso; lo que falte se toma en la próxima consulta
+    threading.Thread(target=_completar_fnac, args=(dict(pendientes),), daemon=True, name="fnac-agenda").start()
+
+
+def _completar_fnac(pendientes):
+    if not _fnac_candado.acquire(blocking=False):
+        return
+    try:
+        for eid, fnac in pendientes.items():
+            try:
+                st = pacs.get_json(f"/studies/{eid}")
+                if not st:
+                    continue
+                if (st.get("PatientMainDicomTags") or {}).get("PatientBirthDate"):
+                    _fnac_listos.add(eid)          # el equipo ya la trajo (o se corrigió a mano): no se toca
+                    continue
+                if not st.get("IsStable"):
+                    continue                       # todavía llegando imágenes: la próxima vez
+                nuevo = pacs.modificar_estudio(eid, {"PatientBirthDate": fnac})
+                for se in st.get("Series", []):     # el visor diagnóstico vuelve a leer los datos del paciente
+                    try:
+                        pacs._req("DELETE", f"/series/{se}/attachments/4301")
+                    except Exception:  # noqa: BLE001
+                        pass
+                con = sqlite3.connect(os.path.join(Config.DATA_DIR, "informes.db"), timeout=30)
+                try:
+                    con.execute("UPDATE informes SET paciente_fnac=? WHERE estudio_id=? AND COALESCE(paciente_fnac,'')=''",
+                                (fnac, nuevo))
+                    con.execute("INSERT INTO auditoria (ts, usuario, accion, detalle, ip) VALUES (?,?,?,?,?)",
+                                (ahora(), "sistema", "fecha_nacimiento_agenda", f"{nuevo}: {fnac[6:8]}/{fnac[4:6]}/{fnac[:4]}", ""))
+                    con.commit()
+                finally:
+                    con.close()
+                _fnac_listos.add(nuevo)
+                app.logger.info("Fecha de nacimiento de la agenda puesta en el estudio %s", nuevo)
+            except Exception as e:  # noqa: BLE001 - se reintenta en la próxima consulta
+                app.logger.warning("No se pudo poner la fecha de nacimiento en %s: %s", eid, e)
+    finally:
+        _fnac_candado.release()
 
 
 def estado_de(o):
@@ -685,7 +745,8 @@ def _examenes_de(rut):
                         "examen": ((inf["descripcion"] if inf and len(eids) > 1 else "") or o["examen"] or "Examen"),
                         "estado": "listo" if listo else "proceso",
                         "estado_txt": "Informe disponible" if listo else "Examen realizado · informe en proceso",
-                        "informe_id": inf["id"] if listo else None, "firmado_en": inf["firmado_en"] if inf else ""})
+                        "informe_id": inf["id"] if listo else None, "firmado_en": inf["firmado_en"] if inf else "",
+                        "estudio_id": eid})
         if eids:
             continue
         if o["pagado"] or o["estado_agenda"] in ("llego", "atendido"):
@@ -695,7 +756,7 @@ def _examenes_de(rut):
         else:
             continue
         out.append({"fecha": o["fecha"], "hora": o["hora"], "examen": o["examen"] or "Examen", "estado": estado,
-                    "estado_txt": txt, "informe_id": None, "firmado_en": ""})
+                    "estado_txt": txt, "informe_id": None, "firmado_en": "", "estudio_id": ""})
     # Informes validados del mismo RUT que no vinieron de la agenda (ej: exámenes anteriores)
     for inf in db.execute("""SELECT id, estudio_id, fecha_estudio, descripcion, firmado_en FROM informes WHERE estado='firmado'
             AND UPPER(REPLACE(REPLACE(REPLACE(paciente_id,'.',''),'-',''),' ',''))=? ORDER BY fecha_estudio DESC LIMIT 60""",
@@ -705,7 +766,7 @@ def _examenes_de(rut):
         f = inf["fecha_estudio"] or ""
         out.append({"fecha": f"{f[:4]}-{f[4:6]}-{f[6:8]}" if len(f) == 8 else f, "hora": "",
                     "examen": inf["descripcion"] or "Examen", "estado": "listo", "estado_txt": "Informe disponible",
-                    "informe_id": inf["id"], "firmado_en": inf["firmado_en"] or ""})
+                    "informe_id": inf["id"], "firmado_en": inf["firmado_en"] or "", "estudio_id": inf["estudio_id"]})
     out.sort(key=lambda e: (e["fecha"], e["hora"]), reverse=True)
     return out
 
@@ -745,6 +806,50 @@ def portal_ver(inf_id):
     db.commit()
     auditar(rut, "portal_ver_informe", f"informe {inf_id}", request.remote_addr or "")
     return redirect(url_for("publico", token=link["token"]))
+
+
+# Imágenes del paciente aunque el informe aún no esté listo (apenas el estudio llega al PACS)
+def _estudio_del_paciente(estudio_id):
+    rut = _rut_paciente()
+    if not rut:
+        return None, None
+    e = next((x for x in _examenes_de(rut) if x["estudio_id"] == estudio_id), None)
+    return (rut, e) if e else (rut, None)
+
+
+@app.route("/paciente/imagenes/<estudio_id>")
+def portal_imagenes(estudio_id):
+    rut, e = _estudio_del_paciente(estudio_id)
+    if not rut:
+        return redirect(url_for("portal_ingreso"))
+    if not e:
+        abort(404)
+    auditar(rut, "portal_ver_imagenes", f"estudio {estudio_id}", request.remote_addr or "")
+    from rutas_publico import visor_ohif_de
+    return render_template("paciente_imagenes.html", c=centro_info(), e=e, estudio_id=estudio_id,
+                           visor_ohif=visor_ohif_de(estudio_id))
+
+
+@app.route("/paciente/imagenes/<estudio_id>/series")
+def portal_series(estudio_id):
+    rut, e = _estudio_del_paciente(estudio_id)
+    if not e:
+        abort(404)
+    return jsonify(series=pacs.series_visor(estudio_id))
+
+
+@app.route("/paciente/imagenes/<estudio_id>/img/<instancia_id>")
+def portal_img(estudio_id, instancia_id):
+    rut, e = _estudio_del_paciente(estudio_id)
+    if not e or not pacs.instancia_pertenece(instancia_id, estudio_id):
+        abort(404)
+    from rutas_publico import ventana_pedida
+    r = pacs.preview(instancia_id, *ventana_pedida())
+    if r is None:
+        abort(404)
+    from flask import Response
+    return Response(r.content, mimetype=r.headers.get("Content-Type", "image/png"),
+                    headers={"Cache-Control": "private, max-age=3600"})
 
 
 @app.after_request

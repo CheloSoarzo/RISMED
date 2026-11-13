@@ -13,7 +13,7 @@ from core import (ESTADOS, MODALIDADES, app, csrf_token, dt_estudio, fmt_duracio
                   pacs, radiologos, registrar, usuario_actual, SQL_USUARIO)
 from db import ahora, ajuste, auditar, get_db
 from orthanc import _normal, fecha_dicom
-from permisos import _accesos, puede, solo_solicitados, ve_estudio
+from permisos import _accesos, estudios_por_nombre_solicitante, puede, solo_solicitados, ve_estudio
 from servicios import asignar, validar_informe
 
 
@@ -139,19 +139,22 @@ def armar_lista(args):
     if solo_solicitados(u):
         palabras = (u["filtro_solicitante"] or "").replace("^", " ").split()
         solicitante = max(palabras, key=len) if palabras else ""
-        # Médico solicitante: los exámenes a los que se le dio acceso (de cualquier fecha) + los que lo
+        # Médico solicitante: los exámenes a los que se le dio acceso + los que lo
         # nombran como solicitante (si tiene su nombre configurado)
         estudios = [e for e in pacs.buscar_estudios(d, h, f["q"], f["modalidad"], solicitante=solicitante)
                     if ve_estudio(u, e)] if solicitante else []
         vistos = {e["id"] for e in estudios}
         q_txt, q_id = _normal(f["q"]), re.sub(r"[^0-9A-Za-z]", "", f["q"]).upper()
-        for eid in _accesos(u)[:300]:
+        for eid in (_accesos(u) + estudios_por_nombre_solicitante(u))[:400]:
             if eid in vistos:
                 continue
             e = pacs.estudio(eid)
             if not e or not ve_estudio(u, e):
                 continue
             if f["modalidad"] and f["modalidad"] not in e["modalidad"].split("/"):
+                continue
+            # sin búsqueda por paciente, respetar el período elegido (Hoy, Ayer, Desde/Hasta)
+            if not f["q"] and not (d <= (e["fecha_raw"] or "") <= h):
                 continue
             if f["q"] and not (all(p in _normal(e["paciente_nombre"]) for p in q_txt.split())
                                or (q_id and q_id in re.sub(r"[^0-9A-Za-z]", "", e["paciente_id"]).upper())
@@ -190,6 +193,9 @@ def armar_lista(args):
         e["informe_id"] = inf["id"] if inf else None
         e["radiologo_id"] = m["radiologo_id"] if m else None
         e["radiologo"] = m["radiologo"] if m else ""
+        # médico solicitante: el de la agenda (o escrito a mano) manda sobre el que trae el DICOM
+        if m and (m["solicitante_manual"] or "").strip():
+            e["solicitante"] = m["solicitante_manual"].strip()
         e["urgente"] = bool(m and m["prioridad"] == "urgente")
         e["notas"] = notas.get(e["id"], 0)
         e["entregas"] = entregas.get(e["id"], 0)

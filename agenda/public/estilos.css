@@ -199,6 +199,9 @@ hr.div{border:0;border-top:1px solid var(--line);margin:4px 0}
 #pago-info{font-size:13px;color:var(--ok);font-weight:600}
 .btn.pay{background:var(--ok);border-color:var(--ok);color:#fff}
 :root:not([data-theme="light"]) .btn.pay{color:#fff}
+.slot.fuera{background:repeating-linear-gradient(135deg,transparent 0 6px,var(--line-soft) 6px 7px)}
+.appt .hoja{position:absolute;top:2px;right:18px;font-size:10px;font-weight:800;letter-spacing:.04em;text-transform:uppercase;padding:1px 6px;border-radius:999px;background:var(--surface);color:var(--accent);border:1px solid var(--accent);cursor:pointer}
+.appt .hoja:hover{background:var(--accent);color:var(--accent-fg)}
 .appt.paid::after{content:"$";position:absolute;top:3px;right:6px;font-family:var(--f-mono);font-size:11px;font-weight:700;color:var(--ok)}
 
 .panel.wide{width:min(820px,100%)}
@@ -382,7 +385,11 @@ button.colhead:hover{background:var(--sunk)}
 #c-examenes{min-width:0}
 #c-examenes tr.tot td{font-weight:800;border-top:2px solid var(--line);border-bottom:0}
 /* caja por período */
-#k-rango{border:1px solid var(--line);background:var(--surface);border-radius:8px;padding:7px 9px;font:inherit;color:var(--fg)}
+.rangos{display:inline-flex;flex-wrap:wrap;gap:4px}
+.rango{border:1px solid var(--line);background:var(--surface);color:var(--fg);border-radius:999px;padding:6px 12px;font:inherit;font-size:13px;cursor:pointer}
+.rango:hover{background:var(--sunk)}
+.rango[aria-pressed="true"]{background:var(--accent);border-color:var(--accent);color:var(--accent-fg,#fff);font-weight:600}
+.rango:focus-visible{outline:2px solid var(--accent,var(--fg));outline-offset:2px}
 .k-entre{display:inline-flex;align-items:center;gap:6px;flex-wrap:wrap}
 .k-entre input{border:1px solid var(--line);background:var(--surface);border-radius:8px;padding:6px 8px;font:inherit;color:var(--fg)}
 .k-entre[hidden]{display:none!important}
@@ -404,6 +411,7 @@ table.pagos.dias tr.click:hover td,table.pagos.dias tr.click:focus td{background
 
 /* Pie de página: dominio, versión y copyright */
 .pie-sistema{text-align:center;font-size:12px;color:var(--muted);padding:18px 16px 22px}
+.msc26-iso{vertical-align:-2px;margin-right:6px}
 @media print{.pie-sistema{display:none}}
 
 /* Fechas en formato chileno dd/mm/aaaa (fecha-cl.js) */
@@ -415,6 +423,22 @@ table.pagos.dias tr.click:hover td,table.pagos.dias tr.click:focus td{background
 .fecha-cl-oculto{position:absolute!important;right:0;bottom:0;width:1px!important;height:1px!important;opacity:0;pointer-events:none;border:0!important;padding:0!important;margin:0!important}
 .fecha-cl-txt.fecha-cl-error{border-color:var(--bad)!important;color:var(--bad)}
 .daynav .fecha-cl{width:auto}
+/* Calendario emergente propio (fecha-cl.js) */
+.cal-pop{position:fixed;z-index:1000;width:252px;background:var(--surface);color:var(--fg);border:1px solid var(--line);border-radius:12px;box-shadow:0 10px 30px rgba(0,0,0,.18);padding:10px}
+.cal-cab{display:flex;align-items:center;justify-content:space-between;margin-bottom:6px}
+.cal-sel{display:flex;gap:4px}
+.cal-sel select{border:1px solid var(--line);background:var(--surface);color:var(--fg);border-radius:7px;padding:4px 4px;font:inherit;font-size:13px;font-weight:600}
+.cal-nav{width:30px;height:30px;border:1px solid var(--line);background:var(--surface);color:var(--fg);border-radius:8px;cursor:pointer;font-size:16px;line-height:1}
+.cal-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:2px}
+.cal-dow{font-size:11px;color:var(--muted);text-align:center;padding:2px 0}
+.cal-dia{height:30px;border:0;background:none;color:var(--fg);border-radius:7px;cursor:pointer;font:inherit;font-size:13px;font-variant-numeric:tabular-nums}
+.cal-dia:hover{background:var(--sunk)}
+.cal-dia.hoy{box-shadow:inset 0 0 0 1px var(--accent);font-weight:700}
+.cal-dia.sel{background:var(--accent);color:var(--accent-fg,#fff);font-weight:700}
+.cal-dia:disabled{opacity:.35;cursor:default}
+.cal-dia:focus-visible,.cal-nav:focus-visible,.cal-pie button:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+.cal-pie{display:flex;justify-content:space-between;margin-top:8px}
+.cal-pie button{border:1px solid var(--line);background:var(--surface);color:var(--fg);border-radius:8px;padding:5px 12px;font:inherit;font-size:13px;cursor:pointer}
 .daynav .fecha-cl-txt{width:7.6em;border:1px solid var(--line);background:var(--surface);border-radius:8px;padding:6px 8px;font-family:var(--f-mono);font-size:13px;color:var(--fg)}
 #k-entre .fecha-cl,.rango .fecha-cl{width:auto;display:inline-flex}
 #k-entre .fecha-cl-txt{width:7.6em;border:1px solid var(--line);background:var(--bg);border-radius:8px;padding:6px 8px;color:var(--fg)}
@@ -452,3 +476,29 @@ body.sin-dinero .ex-vals,body.sin-dinero #ir-cobro,body.sin-dinero #cobro,body.s
 .u-agendas{display:flex;gap:12px;flex-wrap:wrap}.u-agendas label{display:inline-flex;gap:4px;align-items:center;font-weight:500;font-size:13px;text-transform:none;letter-spacing:0;color:var(--fg)}
 .urow{flex-wrap:wrap}.urow .u-agendas{flex-basis:100%;order:9;margin-top:2px;padding-left:2px}
 .urow .who{flex-basis:100%}
+
+/* Firma del desarrollador a la derecha de la cabecera */
+.msc26-marca{display:flex;align-items:center;gap:8px;padding-left:14px;border-left:1px solid var(--line);color:var(--fg);--msc26-acento:#0D9488;text-decoration:none;white-space:nowrap}
+.msc26-marca .msc26-txt{font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);font-weight:600}
+.msc26-marca .msc26-logo{display:block;height:22px;width:auto}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]) .msc26-marca{--msc26-acento:#14B8A6}}
+:root[data-theme="dark"] .msc26-marca{--msc26-acento:#14B8A6}
+@media (max-width:900px){.msc26-marca .msc26-txt{display:none}}
+@media (max-width:600px){.msc26-marca{border-left:0;padding-left:0}}
+@media print{.msc26-marca{display:none}}
+
+/* Caja: tarjetas y depósito estimado */
+.k-tarjetas{border:1px solid var(--line);border-radius:12px;padding:12px 14px;display:flex;flex-direction:column;gap:10px}
+.k-tarj-cab{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
+.k-tarj-cab h3{margin:0}
+.k-tarj-cuerpo{display:grid;grid-template-columns:minmax(0,1.6fr) minmax(0,1fr);gap:14px;align-items:start}
+.k-deposito{display:flex;flex-direction:column;gap:8px}
+.tile.destacado{background:color-mix(in srgb,var(--accent) 12%,var(--surface));border:1px solid color-mix(in srgb,var(--accent) 35%,transparent)}
+.tile.destacado b{font-size:22px}
+.tile.destacado small{color:var(--muted);font-size:12px}
+.k-dep-lista{margin:0;padding-left:18px;font-size:13px;display:flex;flex-direction:column;gap:2px}
+.k-tarj-form{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;align-items:end;border-top:1px solid var(--line);padding-top:10px}
+.k-tarj-form .chk{display:flex;gap:6px;align-items:center;font-size:13px}
+.k-tarj-form .meta{grid-column:1/-1;margin:0}
+.k-tarj-acc{display:flex;gap:6px}
+@media (max-width:760px){.k-tarj-cuerpo{grid-template-columns:1fr}}

@@ -42,6 +42,9 @@ services:
       ORTHANC__DICOM_MODALITIES_IN_DATABASE: "true"
       ORTHANC__DICOM_ASSOCIATION_CLOSE_DELAY: "5"
       ORTHANC__OVERWRITE_INSTANCES: "true"
+      # Sin compresión al llegar: Orthanc no verifica esa compresión y con algunos equipos (CR Fujifilm, que declaran
+      # menos bits de los que usan) alteraba la imagen. La compresión la hace `pacs comprimir` cada noche,
+      # verificada pixel a pixel (ver informes/comprimir.py).
       ORTHANC__STABLE_AGE: "60"
       # El acceso web lo controla la app de informes (un solo login por usuario, vía Caddy).
       # Orthanc NO publica su puerto web: solo Caddy y la app lo alcanzan por la red interna.
