@@ -15,7 +15,7 @@ const COOKIE_SECURE = process.env.COOKIE_SECURE === "1";
 const TRUST_PROXY = process.env.TRUST_PROXY === "1";
 const SESION_HORAS = Number(process.env.SESION_HORAS) || 12;
 const COOKIE = "agenda_sesion";
-const { resumenCaja, hoyCaja, CAJA_TZ, configTarjetas, guardarTarjetas } = require("./caja");
+const CAJA_TZ = process.env.CAJA_TZ || "America/Santiago";
 const CENTRO = txtEnv(process.env.CENTRO_NOMBRE); // nombre del centro que se muestra en pantalla
 function txtEnv(v) { return String(v || "").trim().slice(0, 60); }
 // Logo del centro: CENTRO_LOGO (archivo en public/logos) o, si no se indica, el que coincide con el nombre del centro
@@ -184,10 +184,72 @@ function ahoraCaja() {
   const g = (t) => f.find((x) => x.type === t).value;
   return `${g("year")}-${g("month")}-${g("day")} ${g("hour")}:${g("minute")}:${g("second")}`;
 }
+function hoyCaja() {
+  return new Intl.DateTimeFormat("en-CA", { timeZone: CAJA_TZ, year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
+}
 const fechaCL = (iso) => String(iso).split("-").reverse().join("/");
 const cajaCerrada = (fecha) => !!db.prepare("SELECT 1 FROM cierres WHERE fecha = ?").get(fecha);
-const MEDIOS = ["Efectivo", "Débito", "Crédito", "Transferencia", "Cheque", "Sin copago"];
+const MEDIOS = ["Efectivo", "Débito", "Crédito", "Transferencia", "Sin copago"];
 
+// Resumen de caja de un día o de un período (desde–hasta, ambos incluidos)
+function resumenCaja(desde, hasta = desde) {
+  const pagos = plainAll(db.prepare(`SELECT p.*, u.nombre AS usuario_nombre, ua.nombre AS anulado_por_nombre
+    FROM pagos p LEFT JOIN usuarios u ON u.id = p.usuario_id LEFT JOIN usuarios ua ON ua.id = p.anulado_por
+    WHERE p.fecha BETWEEN ? AND ? ORDER BY p.fecha, p.creado`).all(desde, hasta));
+  const pesosTxt = (n) => "$" + Math.round(n || 0).toLocaleString("es-CL");
+  for (const p of pagos) p.medio_txt = p.monto2 > 0 ? `${p.medio} ${pesosTxt(p.copago - p.monto2)} + ${p.medio2} ${pesosTxt(p.monto2)}` : p.medio;
+  const validos = pagos.filter((p) => !p.anulado);
+  const suma = (arr, k) => arr.reduce((t, p) => t + (p[k] || 0), 0);
+  // Partes de cada pago por medio (un pago dividido aporta a dos medios)
+  const partes = (p) => (p.monto2 > 0 ? [[p.medio, p.copago - p.monto2, true], [p.medio2, p.monto2, false]] : [[p.medio, p.copago, true]]);
+  const efectivoDe = (p) => partes(p).filter(([m]) => m === "Efectivo").reduce((t, [, x]) => t + x, 0);
+  const porMedio = (lista) => {
+    const o = {};
+    for (const p of lista) for (const [m, monto, principal] of partes(p)) {
+      const g = (o[m] = o[m] || { cantidad: 0, valor: 0, bonificacion: 0, copago: 0, descuento: 0 });
+      g.cantidad++; g.copago += monto;
+      if (principal) { g.valor += p.valor; g.bonificacion += p.bonificacion; g.descuento += p.descuento || 0; }
+    }
+    return o;
+  };
+  const agrupar = (clave, lista) => {
+    const o = {};
+    for (const p of lista) { const k = p[clave] || "Sin dato"; o[k] = o[k] || { cantidad: 0, valor: 0, bonificacion: 0, copago: 0 };
+      o[k].cantidad++; o[k].valor += p.valor; o[k].bonificacion += p.bonificacion; o[k].copago += p.copago; o[k].descuento = (o[k].descuento || 0) + (p.descuento || 0); }
+    return o;
+  };
+  const totales = {
+    atenciones: validos.length,
+    valor: suma(validos, "valor"),
+    bonificacion: suma(validos, "bonificacion"),
+    recaudado: suma(validos, "copago"),
+    descuentos: suma(validos, "descuento"),
+    con_descuento: validos.filter((p) => p.descuento > 0).length,
+    por_descuento: agrupar("descuento_motivo", validos.filter((p) => p.descuento > 0)),
+    anulados: pagos.length - validos.length,
+    por_medio: porMedio(validos),
+    por_prevision: agrupar("prevision", validos),
+    por_equipo: agrupar("equipo", validos),
+    efectivo_esperado: validos.reduce((t, p) => t + efectivoDe(p), 0),
+  };
+  const cierres = plainAll(db.prepare(`SELECT c.*, u.nombre AS usuario_nombre FROM cierres c LEFT JOIN usuarios u ON u.id = c.usuario_id
+    WHERE c.fecha BETWEEN ? AND ? ORDER BY c.fecha`).all(desde, hasta)).map((c) => ({ ...c, resumen: JSON.parse(c.resumen) }));
+  // Detalle por día (para períodos de varios días)
+  const dias = {};
+  for (const p of validos) {
+    const d = (dias[p.fecha] = dias[p.fecha] || { fecha: p.fecha, atenciones: 0, valor: 0, bonificacion: 0, descuentos: 0, recaudado: 0, efectivo_esperado: 0 });
+    d.atenciones++; d.valor += p.valor; d.bonificacion += p.bonificacion; d.descuentos += p.descuento || 0; d.recaudado += p.copago;
+    d.efectivo_esperado += efectivoDe(p);
+  }
+  for (const c of cierres) dias[c.fecha] = dias[c.fecha] || { fecha: c.fecha, atenciones: 0, valor: 0, bonificacion: 0, descuentos: 0, recaudado: 0, efectivo_esperado: 0 };
+  const por_dia = Object.values(dias).sort((a, b) => a.fecha.localeCompare(b.fecha)).map((d) => {
+    const c = cierres.find((x) => x.fecha === d.fecha);
+    return { ...d, cerrada: !!c, efectivo_contado: c ? c.efectivo_contado : null, diferencia: c ? c.diferencia : null, cerrada_por: c ? c.usuario_nombre : null };
+  });
+  totales.diferencias = cierres.reduce((t, c) => t + c.diferencia, 0);
+  const cierre = desde === hasta ? cierres[0] || null : null;
+  return { fecha: desde, desde, hasta, un_dia: desde === hasta, hoy: hoyCaja(), pagos, totales, cierre, cierres, por_dia };
+}
 // Lee ?fecha= o ?desde=&hasta= (máximo un año)
 function rangoCaja(url) {
   const fecha = url.searchParams.get("fecha");
@@ -205,7 +267,7 @@ const veEquipo = (u, eq) => { const a = agendasDe(u); return !a.length || a.incl
 const filtroAgendas = (u, alias = "c") => { const a = agendasDe(u); return a.length ? ` AND ${alias}.equipo IN (${a.map((e) => `'${e}'`).join(",")})` : ""; };
 // El usuario de solo lectura no ve valores ni pagos (sí si está pagada)
 const CAMPOS_DINERO = ["valor", "bonificacion", "copago", "pago_medio", "pago_monto", "pago_folio", "pago_descuento",
-  "pago_desc_motivo", "pago_boleta", "pago_medio2", "pago_monto2", "pago_cheque"];
+  "pago_desc_motivo", "pago_boleta", "pago_medio2", "pago_monto2"];
 function paraUsuario(c, u) {
   if (!c || u?.rol !== "lectura") return c;
   const x = { ...c };
@@ -216,7 +278,7 @@ function paraUsuario(c, u) {
 const SELECT_CITA = `SELECT c.*, uc.nombre AS creado_por_nombre, ua.nombre AS actualizado_por_nombre,
   (SELECT COUNT(*) FROM adjuntos a WHERE a.cita_id = c.id) AS adjuntos,
   p.id AS pago_id, p.medio AS pago_medio, p.copago AS pago_monto, p.medio2 AS pago_medio2, p.monto2 AS pago_monto2, p.folio_bono AS pago_folio, p.fecha AS pago_fecha,
-  p.descuento AS pago_descuento, p.descuento_motivo AS pago_desc_motivo, p.boleta AS pago_boleta, p.cheque AS pago_cheque,
+  p.descuento AS pago_descuento, p.descuento_motivo AS pago_desc_motivo, p.boleta AS pago_boleta,
   p.creado AS pago_creado, up.nombre AS pago_usuario
   FROM citas c LEFT JOIN usuarios uc ON uc.id = c.creado_por LEFT JOIN usuarios ua ON ua.id = c.actualizado_por
   LEFT JOIN pagos p ON p.id = (SELECT MAX(id) FROM pagos WHERE cita_id = c.id AND anulado = 0)
@@ -432,14 +494,12 @@ const rutas = [
       if (monto2 >= aPagar) fallo(400, "El monto del segundo medio debe ser menor que el total a pagar.");
     }
     const folio = txt(b.folio_bono, 40), boleta = txt(b.boleta, 40);
-    const cheque = medio === "Cheque" || medio2 === "Cheque" ? txt(b.cheque, 80) : "";
-    if ((medio === "Cheque" || medio2 === "Cheque") && !cheque) fallo(400, "Escribe el número del cheque y el banco.");
     if (c.prevision === "Fonasa" && c.bonificacion > 0 && !folio) fallo(400, "Ingresa el folio del bono Fonasa.");
     db.prepare(`INSERT INTO pagos (cita_id, fecha, paciente, rut, equipo, codigo, examen, prevision, valor, bonificacion, copago, medio, folio_bono, usuario_id, creado,
-      descuento, descuento_motivo, descuento_detalle, examenes, boleta, medio2, monto2, cheque)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(id, fecha, c.paciente, c.rut, c.equipo, c.codigo, c.examen, c.prevision,
+      descuento, descuento_motivo, descuento_detalle, examenes, boleta, medio2, monto2)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(id, fecha, c.paciente, c.rut, c.equipo, c.codigo, c.examen, c.prevision,
       c.valor, c.bonificacion, aPagar, medio, folio, u.id, ahoraCaja(), descuento, descuento ? motivoDesc : "", detalle, c.examenes || "", boleta,
-      medio2, monto2, cheque);
+      medio2, monto2);
     if (["agendado", "confirmado"].includes(c.estado)) db.prepare("UPDATE citas SET estado = 'llego' WHERE id = ?").run(id);
     // Clave para ver el examen en línea: se crea al pagar (solo la primera vez que viene el paciente)
     const portal = integ.activa ? { ...integ.asegurarClave(c.rut, u.id), url: integ.portalUrl } : null;
@@ -477,10 +537,6 @@ const rutas = [
     return [200, resumenCaja(fecha)];
   }],
 
-  ["GET", /^\/api\/caja\/tarjetas$/, "caja", async () => [200, configTarjetas()]],
-  ["PUT", /^\/api\/caja\/tarjetas$/, "admin", async (req) => {
-    try { return [200, guardarTarjetas(await leerCuerpo(req))]; } catch (e) { fallo(400, "Revisa los valores de comisión."); }
-  }],
   ["POST", /^\/api\/caja\/reabrir$/, "admin", async (req) => {
     const b = await leerCuerpo(req);
     db.prepare("DELETE FROM cierres WHERE fecha = ?").run(txt(b.fecha, 10));

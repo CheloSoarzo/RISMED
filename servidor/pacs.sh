@@ -16,10 +16,6 @@
 #                              de todo (imágenes, bases, configuración) en Backblaze B2 (lo hace cron cada noche)
 #   pacs respaldo-configurar   conecta el respaldo externo con Backblaze B2 (pide keyID, applicationKey y bucket)
 #   pacs respaldo-clave        muestra las claves de cifrado del respaldo (guárdalas fuera del servidor)
-#   pacs correo-configurar     correo saliente de los PACS (ej. Brevo) y a quién llega el resumen diario y los avisos
-#   pacs resumen [--ayer]      envía ahora el estado de los sistemas del día en curso (cron: 08:00 con --ayer, día anterior)
-#   pacs resumen-caja [--ayer] envía ahora la caja de cada centro del día (cron: 20:00)
-#   pacs correo-destinos estado|caja "a@x.cl, b@x.cl"   a quién llega cada correo (sin datos: muestra los actuales)
 #   pacs respaldo-subir        sube ahora a Backblaze lo que falte (sin volver a copiar las bases)
 #   pacs respaldo-estado       último respaldo externo y cuánto ocupa
 #   pacs respaldo-probar       baja archivos al azar del respaldo y los compara con el servidor (cron: día 1 de cada mes)
@@ -30,16 +26,10 @@
 #   pacs cuota <nombre> <GB>   espacio contratado de un PACS (se muestra en el panel; 0 = sin límite)
 #   pacs estado                actualiza los números del panel (lo hace cron cada 5 min)
 #   pacs dicom-modo <nombre> aetitle|ip   cómo acepta equipos: solo por AE Title (cualquier IP) o por AE Title + IP
+#   pacs reparar-visor <nombre>   repara los estudios que el visor web no abre y descomprime los guardados comprimidos
 #   pacs dictado-ia activar [small|medium]   transcripción automática de los dictados con IA (Whisper),
 #                              en este mismo servidor y para todos sus PACS (el audio no sale del servidor)
 #   pacs dictado-ia desactivar | estado
-#   pacs comprimir [nombre]    comprime SIN PÉRDIDA (JPEG-LS, verificado pixel a pixel) las imágenes guardadas
-#                              (todos los PACS si no se indica uno). Lo nuevo ya llega comprimido; cron repasa cada noche
-#   pacs comprimir <nombre> --probar   solo el primer estudio pendiente, para ver cuánto ahorra
-#   pacs comprimir --reparar-visor  repara el caché del visor diagnóstico (error «Something went wrong»)
-#   pacs comprimir --descomprimir-fuji devuelve a sin comprimir las imágenes de CR Fujifilm (no se comprimen)
-#   pacs auto-actualizar si|no|estado   el servidor revisa GitHub cada 5 minutos y, si hay una versión nueva
-#                              del PACS o de la agenda, se actualiza solo (viene activado)
 #   pacs base                  (interno) crea la red compartida y la entrada web HTTPS
 set -euo pipefail
 
@@ -461,12 +451,6 @@ cmd_estado() {
     printf ']}\n'
   } > "$dir/.estado.json"
   mv "$dir/.estado.json" "$dir/estado.json"
-  # Aviso inmediato (una vez al día) si el disco pasa del 80 %
-  if [ "${total:-0}" -gt 0 ] && [ $(( 100 * usado / total )) -ge 80 ] && [ "$(cat /var/lib/pacs-aviso-disco 2>/dev/null)" != "$(date +%F)" ]; then
-    date +%F > /var/lib/pacs-aviso-disco
-    avisar "Disco del servidor al $(( 100 * usado / total )) %" "El disco del servidor está al $(( 100 * usado / total )) % de su capacidad.
-Conviene agregar un disco lento (HDD) en Vultr y mover las imágenes antiguas antes de que se llene."
-  fi
 }
 
 cmd_panel_clave() {
@@ -574,23 +558,6 @@ cmd_post_actualizar() {
   if [ -n "$con_agenda" ]; then traer_agenda || echo "Aviso: no se pudo actualizar la agenda"; dc "$con_agenda" build agenda || true; fi
   # Transcripción automática de dictados: se reconstruye si está activada
   if dictado_ia_activo; then transc up -d --build || echo "Aviso: no se pudo actualizar el transcriptor"; fi
-  # Una sola vez (v1.1.25): las imágenes de CR Fujifilm que se comprimieron vuelven a sin comprimir
-  # (el visor diagnóstico no las lee bien comprimidas). Corre en segundo plano y queda en el registro.
-  if [ ! -f "$INST/.fuji-descomprimido" ]; then
-    touch "$INST/.fuji-descomprimido"
-    nohup setsid bash -c "sleep 60; bash '$CODIGO/servidor/pacs.sh' comprimir --descomprimir-fuji" \
-      >> /var/log/pacs-comprimir.log 2>&1 < /dev/null &
-  fi
-  # Una sola vez (v1.1.28): arregla las imágenes del CR Fujifilm que el visor diagnóstico no puede abrir
-  # y su caché (error «The series metadata json does not contain an array» al abrir el estudio)
-  if [ ! -f "$INST/.visor-reparado-3" ]; then
-    touch "$INST/.visor-reparado-3"
-    nohup setsid bash -c "for i in \$(seq 40); do sleep 30; docker exec pacs-$(instancias | head -1)-informes-1 grep -q dicomweb_ok comprimir.py 2>/dev/null && break; done; bash '$CODIGO/servidor/pacs.sh' comprimir --reparar-visor" \
-      >> /var/log/pacs-comprimir.log 2>&1 < /dev/null &
-  fi
-  # Actualización automática desde GitHub: viene activada (se apaga con: pacs auto-actualizar no)
-  touch "$INST/servidor.env"
-  grep -qE "^AUTO_ACTUALIZAR=" "$INST/servidor.env" || poner "$INST/servidor.env" AUTO_ACTUALIZAR true
   for n in $(instancias); do
     # PACS creados antes de existir esta opción: son los propios
     grep -qE "^ADMINISTRA_SERVIDOR=" "$INST/$n/.env" || poner "$INST/$n/.env" ADMINISTRA_SERVIDOR true
@@ -612,6 +579,15 @@ cmd_post_actualizar() {
   recargar_caddy
   proxy up -d
   instalar_cron
+  # 1.1.5: una sola vez, deja sin comprimir las imágenes guardadas en JPEG-LS (en segundo plano: puede tardar)
+  for n in $(instancias); do
+    local marca="$INST/$n/data/.sin-compresion-1.1.5"
+    [ -f "$marca" ] && continue
+    [ "$(leer "$INST/$n/.env" ACTIVO)" = "false" ] && continue
+    touch "$marca"
+    ( sleep 30; bash "$CODIGO/servidor/pacs.sh" reparar-visor "$n" ) >> "/var/log/pacs-reparar-$n.log" 2>&1 &
+    echo "PACS $n: descomprimiendo imágenes en segundo plano (registro en /var/log/pacs-reparar-$n.log)"
+  done
   echo "Todos los PACS actualizados a la versión $(version)"
 }
 
@@ -623,23 +599,13 @@ escribir_version() {
 }
 
 instalar_cron() {
-  # El servidor trabaja en hora de Chile: las tareas de la noche corren a la hora que dice aquí
-  local zona; zona="$(leer "$INST/servidor.env" ZONA_HORARIA)"; zona="${zona:-America/Santiago}"
-  if command -v timedatectl >/dev/null && [ "$(timedatectl show -p Timezone --value 2>/dev/null)" != "$zona" ]; then
-    timedatectl set-timezone "$zona" 2>/dev/null && { systemctl restart cron 2>/dev/null || true; }
-  fi
   cat > "$CRON_FILE" <<CRON
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-# Hora de Chile (America/Santiago). 02:00 compresión, 03:00 respaldo, 08:00 estado del día anterior, 20:00 caja del día
-# (fuera del horario en que trabajan el radiólogo y la transcripcionista)
 */5 * * * * root pacs firewall >> /var/log/pacs-firewall.log 2>&1
 @reboot root sleep 90 && pacs firewall >> /var/log/pacs-firewall.log 2>&1
+30 3 * * * root pacs respaldo >> /var/log/pacs-respaldo.log 2>&1
 * * * * * root pacs revisar >> /var/log/pacs-actualizacion.log 2>&1
 */5 * * * * root pacs estado >/dev/null 2>&1
-0 2 * * * root pacs comprimir --noche >> /var/log/pacs-comprimir.log 2>&1
-0 3 * * * root pacs respaldo >> /var/log/pacs-respaldo.log 2>&1
-0 8 * * * root pacs resumen --ayer >> /var/log/pacs-resumen.log 2>&1
-0 20 * * * root pacs resumen-caja >> /var/log/pacs-resumen.log 2>&1
 0 5 1 * * root pacs respaldo-probar >> /var/log/pacs-respaldo.log 2>&1
 CRON
   if [ "$CRON_FILE" = /etc/cron.d/pacs ]; then rm -f /etc/cron.d/pacs-firewall /etc/cron.d/pacs-respaldo; fi
@@ -648,26 +614,16 @@ CRON
 # Cada minuto (cron): si el administrador de un PACS propio pidió actualizar desde la web, se actualiza.
 cmd_revisar() {
   local n pedido=""
-  # Cada minuto: arregla para el visor diagnóstico las series que terminaron de llegar (ej. CR Fujifilm)
-  for n in $(instancias); do
-    [ "$(leer "$INST/$n/.env" ACTIVO)" = "false" ] && continue
-    flock -n "/var/lock/pacs-reparar-$n.lock" timeout 300 docker exec "pacs-$n-informes-1" python comprimir.py --reparar-nuevos 2>&1 \
-      | grep -v "^$" >> /var/log/pacs-comprimir.log || true
-  done
   for n in $(instancias); do
     local f="$INST/$n/data/informes/actualizar.solicitud"
     [ -f "$f" ] || continue
-    if [ "$(leer "$INST/$n/.env" ADMINISTRA_SERVIDOR)" = "true" ]; then pedido="pedida desde el PACS $n"; fi
+    if [ "$(leer "$INST/$n/.env" ADMINISTRA_SERVIDOR)" = "true" ]; then pedido="$n"; fi
     rm -f "$f"     # las de PACS sin permiso se descartan
   done
-  # Actualización automática: cada 5 minutos se revisa si hay algo nuevo en GitHub (PACS o agenda)
-  if [ -z "$pedido" ] && [ "$(leer "$INST/servidor.env" AUTO_ACTUALIZAR)" = "true" ] && [ $((10#$(date +%M) % 5)) -eq 0 ]; then
-    hay_version_nueva && pedido="automática: hay una versión nueva en GitHub"
-  fi
   [ -n "$pedido" ] || return 0
   exec 9>/var/lock/pacs-actualizar.lock
   flock -n 9 || return 0
-  echo "$(date '+%F %T') actualización $pedido"
+  echo "$(date '+%F %T') actualización pedida desde el PACS $pedido"
   local res
   if res="$(bash "$CODIGO/servidor/pacs.sh" actualizar 2>&1)"; then
     res="$(date '+%d/%m/%Y %H:%M') OK, versión $(version)"
@@ -684,62 +640,12 @@ cmd_revisar() {
   return 0
 }
 
-hay_version_nueva() {  # 0 si en GitHub hay commits nuevos del PACS o de la agenda
-  local dir
-  for dir in "$CODIGO" "$AGENDA_CODIGO"; do
-    [ -d "$dir/.git" ] || continue
-    timeout 60 git -C "$dir" fetch -q origin 2>/dev/null || continue
-    [ "$(git -C "$dir" rev-parse HEAD)" != "$(git -C "$dir" rev-parse '@{u}' 2>/dev/null || git -C "$dir" rev-parse HEAD)" ] && return 0
-  done
-  return 1
-}
-
-cmd_auto_actualizar() {
-  touch "$INST/servidor.env"
-  case "${1:-estado}" in
-    si|activar) poner "$INST/servidor.env" AUTO_ACTUALIZAR true
-       echo "Actualización automática ACTIVADA: cada 5 minutos se revisa GitHub y, si hay versión nueva, se instala sola.";;
-    no|desactivar) poner "$INST/servidor.env" AUTO_ACTUALIZAR false
-       echo "Actualización automática desactivada. Para actualizar: pacs actualizar (o el botón en la web del PACS).";;
-    estado)
-      if [ "$(leer "$INST/servidor.env" AUTO_ACTUALIZAR)" = "true" ]; then echo "Actualización automática: activada"; else echo "Actualización automática: desactivada"; fi
-      echo "Versión instalada: $(version)"
-      echo "Últimas actualizaciones:"; tail -n 6 /var/log/pacs-actualizacion.log 2>/dev/null | sed 's/^/  /' || true;;
-    *) error "uso: pacs auto-actualizar si | no | estado";;
-  esac
-}
-
 cmd_firewall() {
   local n
   for n in $(instancias); do
     [ "$(leer "$INST/$n/.env" ACTIVO)" = "false" ] && continue
     bash "$CODIGO/firewall/sincronizar_firewall.sh" "$INST/$n/.env" | sed "s/^/[$n] /" || true
   done
-}
-
-cmd_comprimir() {
-  local objetivo="" extra="" n hubo=""
-  for a in "$@"; do
-    case "$a" in
-      --probar) extra="--estudios 1";;
-      --noche) extra="--desde-horas 2";;    # tarea nocturna: solo exámenes que ya terminaron de llegar
-      --descomprimir-fuji) extra="--descomprimir-excluidos";;   # devuelve a sin comprimir los CR Fujifilm
-      --reparar-visor) extra="--reparar-visor";;   # borra el caché dañado del visor diagnóstico (error al abrir)
-      todos) ;;
-      *) objetivo="$a";;
-    esac
-  done
-  exec 9>/var/lock/pacs-comprimir.lock
-  flock -n 9 || { echo "Ya hay una compresión en curso."; return 0; }
-  for n in $(instancias); do
-    [ -n "$objetivo" ] && [ "$n" != "$objetivo" ] && continue
-    [ "$(leer "$INST/$n/.env" ACTIVO)" = "false" ] && continue
-    hubo=1
-    echo "== $n · $(date '+%d/%m/%Y %H:%M')"
-    # shellcheck disable=SC2086
-    docker exec "pacs-$n-informes-1" python comprimir.py $extra || echo "[$n] la compresión no terminó bien"
-  done
-  [ -n "$hubo" ] || error "no existe el PACS «$objetivo» (mira: pacs lista)"
 }
 
 cmd_respaldo() {
@@ -762,148 +668,6 @@ cmd_respaldo() {
   find "$RESPALDOS" -type f -name "*_20*" -mtime +14 -delete
   echo "Respaldos en $RESPALDOS"
   respaldo_remoto
-}
-
-# ---------- Correo de los sistemas: resumen diario y avisos ----------
-# Los PACS envían por SMTP (ej. Brevo): smtp-relay.brevo.com, puerto 587, usuario y clave SMTP de Brevo.
-# RESUMEN_PARA (servidor.env): a quién llegan el resumen de las 00:00 y los avisos.
-
-pacs_con_correo() {  # el primer PACS activo con el correo saliente configurado
-  local n
-  for n in $(instancias); do
-    [ "$(leer "$INST/$n/.env" ACTIVO)" = "false" ] && continue
-    [ -n "$(leer "$INST/$n/.env" SMTP_HOST)" ] && [ -n "$(leer "$INST/$n/.env" SMTP_FROM)" ] && { echo "$n"; return 0; }
-  done
-  return 1
-}
-
-# avisar "<asunto>" "<texto>"  — aviso inmediato por correo (si está configurado); nunca hace fallar al que lo llama
-avisar() {
-  local para n
-  para="$(leer "$INST/servidor.env" RESUMEN_PARA)"
-  [ -n "$para" ] || return 0
-  n="$(pacs_con_correo)" || return 0
-  printf '%s\n' "$2" | timeout 60 docker exec -i "pacs-$n-informes-1" python resumen_cli.py aviso --para "$para" \
-    --asunto "$1 · $(hostname)" >/dev/null 2>&1 || true
-}
-
-cmd_correo_configurar() {
-  echo "Correo saliente de los PACS (resumen diario, avisos y envío de informes a pacientes)"
-  echo "Con Brevo: Configuración → SMTP y API → pestaña SMTP (servidor, puerto, login y una clave SMTP)."
-  echo
-  local host puerto usuario clave remitente para n
-  read -rp "Servidor SMTP [smtp-relay.brevo.com]: " host; host="${host:-smtp-relay.brevo.com}"
-  read -rp "Puerto [587]: " puerto; puerto="${puerto:-587}"
-  read -rp "Usuario / login SMTP: " usuario
-  read -rsp "Clave SMTP (no se ve al escribir): " clave; echo
-  read -rp "Dirección remitente (verificada en Brevo, ej. informes@inq.cl): " remitente
-  read -rp "¿A qué correo(s) envío el resumen diario y los avisos? (separados por coma): " para
-  [ -n "$usuario" ] && [ -n "$clave" ] && [[ "$remitente" == *@*.* ]] || error "faltan datos"
-  [[ "$clave" == *"|"* ]] && error "la clave no puede tener el carácter |"
-  for n in $(instancias); do
-    local e="$INST/$n/.env" centro
-    centro="$(leer "$e" CENTRO_NOMBRE | tr -d '"<>')"
-    poner "$e" SMTP_HOST "$host"; poner "$e" SMTP_PORT "$puerto"; poner "$e" SMTP_USER "$usuario"
-    poner "$e" SMTP_PASSWORD "$clave"; poner "$e" SMTP_FROM "${centro:-Centro} <$remitente>"
-    poner "$e" SMTP_SSL "$([ "$puerto" = 465 ] && echo true || echo false)"; poner "$e" SMTP_STARTTLS true
-    [ "$(leer "$e" ACTIVO)" = "false" ] || dc "$n" up -d >/dev/null 2>&1
-  done
-  [ -n "$para" ] && poner "$INST/servidor.env" RESUMEN_PARA "$para"
-  echo "Esperando que los PACS se reinicien..."; sleep 15
-  n="$(pacs_con_correo)" || error "no quedó ningún PACS con correo"
-  if [ -n "$para" ]; then
-    docker exec "pacs-$n-informes-1" python resumen_cli.py probar --para "$para" \
-      || error "no se pudo enviar: revisa usuario, clave y que el remitente esté verificado en Brevo"
-  fi
-  echo "Listo. El resumen diario llega a las 00:00 (para probarlo ahora: pacs resumen)."
-}
-
-# Resumen del día (cron a las 00:00: resume el día que terminó)
-cmd_resumen() {
-  local para n fecha primero=1 caidos="" c
-  para="$(leer "$INST/servidor.env" RESUMEN_PARA)"
-  [ -n "$para" ] || { echo "Falta el destinatario (pacs correo-configurar)"; return 0; }
-  n="$(pacs_con_correo)" || { echo "El correo saliente no está configurado (pacs correo-configurar)"; return 0; }
-  # --ayer (cron de las 08:00): el día anterior completo. A mano: el día en curso
-  if [ "${1:-}" = "--ayer" ]; then fecha="$(date -d yesterday +%F)"; else fecha="$(date +%F)"; fi
-  local t0=$SECONDS tmp; tmp="$(mktemp -d)"
-  echo "[$(date '+%d/%m/%Y %H:%M:%S')] Resumen de los sistemas del $(date -d "$fecha" +%d/%m/%Y): inicio"
-  # Los datos de cada centro se piden a la vez (antes, uno tras otro)
-  for c in $(instancias); do
-    [ "$(leer "$INST/$c/.env" ACTIVO)" = "false" ] && continue
-    ( s0=$SECONDS
-      timeout 600 docker exec "pacs-$c-informes-1" python resumen_cli.py datos --fecha "$fecha" 2>/dev/null | tail -n1 > "$tmp/$c.json" || true
-      echo "[$(date '+%H:%M:%S')]   $c: datos en $((SECONDS - s0)) s" ) &
-  done
-  cmd_estado >/dev/null 2>&1 || true
-  wait
-  for c in $(instancias); do
-    [ "$(leer "$INST/$c/.env" ACTIVO)" = "false" ] && continue
-    while read -r nombre estado; do
-      [ "$estado" = running ] || caidos="$caidos \"$nombre ($estado)\","
-    done < <(docker ps -a --filter "name=^pacs-$c-" --format '{{.Names}} {{.State}}')
-  done
-  local respaldo_conf=false srv; [ -f "$RCLONE_CONF" ] && grep -q "^\[pacs-cifrado\]" "$RCLONE_CONF" && respaldo_conf=true
-  srv="$(sed -n 's/.*"servidor":\({[^}]*}\).*/\1/p' "$INST/caddy/portal/panel/estado.json" 2>/dev/null || true)"
-  [ -n "$srv" ] || srv='{}'
-  {
-    printf '{"fecha":"%s","version":"%s","servidor":%s,"respaldo":{"configurado":%s,"estado":"%s"},"contenedores_caidos":[%s],"pacs":[' \
-      "$fecha" "$(js "$(version_sistema)")" \
-      "$srv" \
-      "$respaldo_conf" "$(js "$(cat "$ESTADO_REMOTO" 2>/dev/null)")" "${caidos%,}"
-    for c in $(instancias); do
-      [ "$(leer "$INST/$c/.env" ACTIVO)" = "false" ] && continue
-      local d; d="$(cat "$tmp/$c.json" 2>/dev/null || true)"
-      case "$d" in "{"*"}") ;; *) d="{\"centro\":\"$c\",\"error_pacs\":\"sin respuesta\"}";; esac
-      [ $primero = 1 ] || printf ','; primero=0
-      printf '%s' "$d"
-    done
-    printf ']}\n'
-  } | docker exec -i "pacs-$n-informes-1" python resumen_cli.py enviar --para "$para"
-  rm -rf "$tmp"
-  echo "[$(date '+%d/%m/%Y %H:%M:%S')] Resumen terminado en $((SECONDS - t0)) s"
-}
-
-# Resumen de caja de cada centro (cron 20:00: la caja del día). Va a CAJA_PARA (pacs correo-destinos caja ...)
-cmd_resumen_caja() {
-  local para n fecha primero=1 c
-  para="$(leer "$INST/servidor.env" CAJA_PARA)"
-  [ -n "$para" ] || { echo "Falta a quién enviar la caja (pacs correo-destinos caja correo@x.cl)"; return 0; }
-  n="$(pacs_con_correo)" || { echo "El correo saliente no está configurado (pacs correo-configurar)"; return 0; }
-  if [ "${1:-}" = "--ayer" ]; then fecha="$(date -d yesterday +%F)"; else fecha="$(date +%F)"; fi
-  {
-    printf '{"fecha":"%s","version":"%s","pacs":[' "$fecha" "$(js "$(version_sistema)")"
-    for c in $(instancias); do
-      [ "$(leer "$INST/$c/.env" ACTIVO)" = "false" ] && continue
-      [ -n "$(leer "$INST/$c/.env" AGENDA_DOMINIO)" ] || continue
-      local cj; cj="$(timeout 120 docker exec "pacs-$c-agenda-1" node --no-warnings scripts/resumen-caja.js --fecha "$fecha" --detalle 2>/dev/null | tail -n1 || true)"
-      case "$cj" in "{"*"}") ;; *) cj='{"error":"sin respuesta de la agenda"}';; esac
-      [ $primero = 1 ] || printf ','; primero=0
-      printf '{"centro":"%s","caja":%s}' "$(js "$(leer "$INST/$c/.env" CENTRO_NOMBRE)")" "$cj"
-    done
-    printf ']}\n'
-  } | docker exec -i "pacs-$n-informes-1" python resumen_cli.py caja --para "$para"
-}
-
-# pacs correo-destinos estado|caja "a@x.cl, b@x.cl"   (sin correos: muestra los actuales)
-cmd_correo_destinos() {
-  local cual="${1:-}" lista="${2:-}" var
-  case "$cual" in
-    estado) var=RESUMEN_PARA;; caja) var=CAJA_PARA;;
-    "") echo "Estado de los sistemas (08:00, día anterior): $(leer "$INST/servidor.env" RESUMEN_PARA)"
-        echo "Caja de los centros (20:00, el día):          $(leer "$INST/servidor.env" CAJA_PARA)"; return 0;;
-    *) error "uso: pacs correo-destinos estado|caja \"correo1@x.cl, correo2@x.cl\"";;
-  esac
-  [ -n "$lista" ] || error "faltan los correos"
-  local limpio="" x
-  IFS=',' read -ra partes <<<"$lista"
-  for x in "${partes[@]}"; do
-    x="$(echo "$x" | tr -d ' <>"|')"
-    [[ "$x" =~ ^[^@]+@[^@]+\.[^@]+$ ]] || error "correo no válido: $x"
-    limpio="${limpio:+$limpio,}$x"
-  done
-  poner "$INST/servidor.env" "$var" "$limpio"
-  echo "Listo: $var=$limpio"
 }
 
 # ---------- Respaldo fuera del servidor (Backblaze B2), cifrado ----------
@@ -948,8 +712,6 @@ respaldo_remoto() {
   else
     echo "error $(date '+%Y-%m-%d %H:%M:%S') $fallas partes fallaron" > "$ESTADO_REMOTO"
     echo "$(date '+%d/%m/%Y %H:%M') Respaldo externo: $fallas partes fallaron (se reintenta mañana)"
-    avisar "Falló el respaldo externo" "El respaldo de esta noche a Backblaze falló en $fallas partes. Se reintenta mañana.
-Detalle en el servidor: /var/log/pacs-respaldo.log  (pacs respaldo-estado)"
     return 1
   fi
 }
@@ -999,7 +761,7 @@ CONF
     && rclone --config "$RCLONE_CONF" cat "${REMOTO}prueba.txt" >/dev/null \
     || error "no se pudo escribir en el bucket: revisa keyID, applicationKey y nombre del bucket"
   rm -f /tmp/pacs-prueba-respaldo.txt
-  echo "Conexión OK. El respaldo externo corre cada madrugada a las 03:00 (hora de Chile)."
+  echo "Conexión OK. El respaldo externo corre cada noche después del respaldo de las bases (03:30)."
   echo
   cmd_respaldo_clave
   echo
@@ -1042,9 +804,41 @@ cmd_respaldo_probar() {
   done
   rm -rf "$tmp"
   echo "$(date '+%d/%m/%Y %H:%M') Prueba de restauración: $ok archivos idénticos, $mal con problemas"
-  [ "$mal" = 0 ] || avisar "Prueba de restauración con problemas" "La prueba mensual bajó archivos del respaldo y $mal no coinciden con el servidor ($ok sí).
-Revisar: pacs respaldo-probar"
   [ "$mal" = 0 ]
+}
+
+cmd_reparar_visor() {  # estudios ya recibidos: repara los que el visor web no abre y descomprime los que quedaron en JPEG-LS
+  local n="${1:-}"; existe "$n"
+  echo "Revisando las imágenes de $n (puede tardar unos minutos)..."
+  docker exec -i "pacs-$n-informes-1" python - <<'PY'
+import os, requests
+O = os.environ["ORTHANC_URL"]
+s = requests.Session()
+JPEG_LS = "1.2.840.10008.1.2.4.80"
+SIN_COMPRESION = "1.2.840.10008.1.2.1"   # Explicit VR Little Endian
+revisadas = reparadas = fallidas = 0
+for iid in s.get(f"{O}/instances", timeout=120).json():
+    t = s.get(f"{O}/instances/{iid}/tags?simplify", timeout=120).json()
+    st, se, sop = t.get("StudyInstanceUID"), t.get("SeriesInstanceUID"), t.get("SOPInstanceUID")
+    revisadas += 1
+    if not (st and se and sop):
+        continue
+    cmd = {"Force": True, "Keep": ["StudyInstanceUID", "SeriesInstanceUID", "SOPInstanceUID"]}
+    ts = s.get(f"{O}/instances/{iid}/metadata/TransferSyntax", timeout=60).text.strip()
+    if ts == JPEG_LS:
+        cmd["Transcode"] = SIN_COMPRESION   # vuelve al formato original, sin comprimir
+    if not s.get(f"{O}/dicom-web/studies/{st}/series/{se}/instances/{sop}/metadata", timeout=300).ok:
+        cmd["RemovePrivateTags"] = True     # etiquetas privadas que el visor web no puede leer
+    if len(cmd) == 2:
+        continue
+    r = s.post(f"{O}/instances/{iid}/modify", json=cmd, timeout=600)
+    if r.ok and s.post(f"{O}/instances", data=r.content, timeout=600).ok:
+        reparadas += 1
+    else:
+        fallidas += 1
+        print("  no se pudo reparar", sop)
+print(f"Imágenes revisadas: {revisadas} · reparadas o descomprimidas: {reparadas} · con error: {fallidas}")
+PY
 }
 
 c="${1:-}"; shift || true
@@ -1067,10 +861,6 @@ case "$c" in
   respaldo-estado) cmd_respaldo_estado;;
   respaldo-probar) cmd_respaldo_probar;;
   respaldo-subir) respaldo_remoto;;
-  correo-configurar) cmd_correo_configurar;;
-  resumen) cmd_resumen "$@";;
-  resumen-caja) cmd_resumen_caja "$@";;
-  correo-destinos) cmd_correo_destinos "$@";;
   agenda) cmd_agenda "$@";;
   agenda-importar) cmd_agenda_importar "$@";;
   portal) cmd_portal "$@"; cmd_estado;;
@@ -1078,8 +868,7 @@ case "$c" in
   cuota) cmd_cuota "$@";;
   estado) cmd_estado;;
   dicom-modo) cmd_dicom_modo "$@";;
+  reparar-visor) cmd_reparar_visor "$@";;
   dictado-ia) cmd_dictado_ia "$@";;
-  comprimir) cmd_comprimir "$@";;
-  auto-actualizar) cmd_auto_actualizar "$@";;
-  *) sed -n '2,42p' "$0"; exit 1;;
+  *) sed -n '2,33p' "$0"; exit 1;;
 esac

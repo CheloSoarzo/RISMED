@@ -28,7 +28,11 @@ services:
       - ${INSTANCIA_DIR}/data/orthanc:/var/lib/orthanc/db
       # Lista de trabajo (worklist) que arma la app a partir de la agenda
       - ${INSTANCIA_DIR}/data/worklists:/worklists:ro
+      # Repara al recibirlas las imágenes que los visores web no pueden leer (etiquetas privadas, ej. CR Fuji)
+      - ./orthanc/reparar-dicomweb.lua:/etc/orthanc/reparar-dicomweb.lua:ro
     environment:
+      ORTHANC__LUA_SCRIPTS: '["/etc/orthanc/reparar-dicomweb.lua"]'
+      # Sin compresión: las imágenes se guardan tal como las envía el equipo (pedido del centro, 12/11/2026).
       ORTHANC__NAME: ${PACS_NOMBRE:-PACS}
       ORTHANC__DICOM_AET: ${PACS_AET:-PACS}
       ORTHANC__DICOM_CHECK_CALLED_AET: "false"
@@ -39,9 +43,6 @@ services:
       ORTHANC__DICOM_MODALITIES_IN_DATABASE: "true"
       ORTHANC__DICOM_ASSOCIATION_CLOSE_DELAY: "5"
       ORTHANC__OVERWRITE_INSTANCES: "true"
-      # Sin compresión al llegar: Orthanc no verifica esa compresión y con algunos equipos (CR Fujifilm, que declaran
-      # menos bits de los que usan) alteraba la imagen. La compresión la hace `pacs comprimir` cada noche,
-      # verificada pixel a pixel (ver informes/comprimir.py).
       ORTHANC__STABLE_AGE: "60"
       ORTHANC__AUTHENTICATION_ENABLED: "false"
       ORTHANC__POSTGRESQL__HOST: postgres
@@ -50,7 +51,7 @@ services:
       ORTHANC__POSTGRESQL__PASSWORD: ${PG_PASSWORD}
       DICOM_WEB_PLUGIN_ENABLED: "true"
       # Sin caché de metadatos DICOMweb: si una imagen no se puede convertir, la caché queda vacía y el visor sigue
-      # fallando aunque después se repare (ver informes/comprimir.py). Sin caché se lee directo.
+      # fallando aunque después se repare (ver orthanc/reparar-dicomweb.lua). Sin caché se lee directo.
       ORTHANC__DICOM_WEB__ENABLE_METADATA_CACHE: "false"
       OHIF_PLUGIN_ENABLED: "true"
       ORTHANC__OHIF__DATA_SOURCE: "dicom-web"

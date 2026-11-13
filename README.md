@@ -329,27 +329,3 @@ firewall/            Script que abre el puerto DICOM solo a los centros registra
 
 Firma electrónica avanzada,
 envío automático por WhatsApp Business, informes comparativos lado a lado, visores de escritorio (Weasis/RadiAnt).
-
-### Compresión sin pérdida de las imágenes
-
-`pacs comprimir` pasa las imágenes sin comprimir a **JPEG-LS sin pérdida** (el estándar DICOM para esto): el CT
-queda típicamente 2 a 3 veces más liviano y los pixeles son exactamente los mismos. Cada imagen se verifica pixel a
-pixel (huella SHA-256 de los pixeles antes y después); si no coincide, se repone la original. Los UID no cambian,
-así que informes, links, portal y agenda siguen apuntando al mismo examen. Las imágenes ya comprimidas (ej.
-ecografías en JPEG) no se tocan.
-
-- `pacs comprimir insi --probar` comprime solo el primer estudio pendiente, para ver cuánto ahorra.
-- `pacs comprimir` comprime todo lo pendiente de todos los PACS (se puede repetir: lo ya comprimido se salta).
-- No se comprime al llegar (`IngestTranscoding` de Orthanc no verifica y con CR Fujifilm alteraba la imagen):
-  la compresión se hace solo con verificación, cada noche.
-- Los equipos de `COMPRESION_EXCLUIR` (por defecto `FUJI`) no se comprimen. `pacs comprimir --descomprimir-fuji`
-  devuelve a sin comprimir (verificado) las imágenes de esos equipos.
-- Cada noche (01:15) cron repasa con verificación lo que haya quedado sin comprimir. Registro en
-  `/var/log/pacs-comprimir.log`.
-
-### Actualización automática
-
-El servidor revisa GitHub cada 5 minutos (cron `pacs revisar`); si hay una versión nueva del PACS o de la agenda,
-corre `pacs actualizar` solo y deja el resultado en la web del PACS (Sistema) y en `/var/log/pacs-actualizacion.log`.
-Viene activada; se maneja con `pacs auto-actualizar si | no | estado`.
-

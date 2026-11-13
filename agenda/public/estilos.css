@@ -199,9 +199,6 @@ hr.div{border:0;border-top:1px solid var(--line);margin:4px 0}
 #pago-info{font-size:13px;color:var(--ok);font-weight:600}
 .btn.pay{background:var(--ok);border-color:var(--ok);color:#fff}
 :root:not([data-theme="light"]) .btn.pay{color:#fff}
-.slot.fuera{background:repeating-linear-gradient(135deg,transparent 0 6px,var(--line-soft) 6px 7px)}
-.appt .hoja{position:absolute;top:2px;right:18px;font-size:10px;font-weight:800;letter-spacing:.04em;text-transform:uppercase;padding:1px 6px;border-radius:999px;background:var(--surface);color:var(--accent);border:1px solid var(--accent);cursor:pointer}
-.appt .hoja:hover{background:var(--accent);color:var(--accent-fg)}
 .appt.paid::after{content:"$";position:absolute;top:3px;right:6px;font-family:var(--f-mono);font-size:11px;font-weight:700;color:var(--ok)}
 
 .panel.wide{width:min(820px,100%)}
@@ -385,11 +382,7 @@ button.colhead:hover{background:var(--sunk)}
 #c-examenes{min-width:0}
 #c-examenes tr.tot td{font-weight:800;border-top:2px solid var(--line);border-bottom:0}
 /* caja por período */
-.rangos{display:inline-flex;flex-wrap:wrap;gap:4px}
-.rango{border:1px solid var(--line);background:var(--surface);color:var(--fg);border-radius:999px;padding:6px 12px;font:inherit;font-size:13px;cursor:pointer}
-.rango:hover{background:var(--sunk)}
-.rango[aria-pressed="true"]{background:var(--accent);border-color:var(--accent);color:var(--accent-fg,#fff);font-weight:600}
-.rango:focus-visible{outline:2px solid var(--accent,var(--fg));outline-offset:2px}
+#k-rango{border:1px solid var(--line);background:var(--surface);border-radius:8px;padding:7px 9px;font:inherit;color:var(--fg)}
 .k-entre{display:inline-flex;align-items:center;gap:6px;flex-wrap:wrap}
 .k-entre input{border:1px solid var(--line);background:var(--surface);border-radius:8px;padding:6px 8px;font:inherit;color:var(--fg)}
 .k-entre[hidden]{display:none!important}
@@ -486,19 +479,3 @@ body.sin-dinero .ex-vals,body.sin-dinero #ir-cobro,body.sin-dinero #cobro,body.s
 @media (max-width:900px){.msc26-marca .msc26-txt{display:none}}
 @media (max-width:600px){.msc26-marca{border-left:0;padding-left:0}}
 @media print{.msc26-marca{display:none}}
-
-/* Caja: tarjetas y depósito estimado */
-.k-tarjetas{border:1px solid var(--line);border-radius:12px;padding:12px 14px;display:flex;flex-direction:column;gap:10px}
-.k-tarj-cab{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
-.k-tarj-cab h3{margin:0}
-.k-tarj-cuerpo{display:grid;grid-template-columns:minmax(0,1.6fr) minmax(0,1fr);gap:14px;align-items:start}
-.k-deposito{display:flex;flex-direction:column;gap:8px}
-.tile.destacado{background:color-mix(in srgb,var(--accent) 12%,var(--surface));border:1px solid color-mix(in srgb,var(--accent) 35%,transparent)}
-.tile.destacado b{font-size:22px}
-.tile.destacado small{color:var(--muted);font-size:12px}
-.k-dep-lista{margin:0;padding-left:18px;font-size:13px;display:flex;flex-direction:column;gap:2px}
-.k-tarj-form{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;align-items:end;border-top:1px solid var(--line);padding-top:10px}
-.k-tarj-form .chk{display:flex;gap:6px;align-items:center;font-size:13px}
-.k-tarj-form .meta{grid-column:1/-1;margin:0}
-.k-tarj-acc{display:flex;gap:6px}
-@media (max-width:760px){.k-tarj-cuerpo{grid-template-columns:1fr}}
